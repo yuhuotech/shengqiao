@@ -28,18 +28,13 @@ jobs:
           cache: gradle
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: reactivecircus/android-sdk-setup@v1
         with:
-          cmdline-tools-version: 11076708
-
-      - name: Install Android SDK platform and build-tools
-        run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-            "platforms;android-36" "build-tools;36.0.0" "platform-tools"
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          ls "$ANDROID_HOME/platforms"
-          ls "$ANDROID_HOME/build-tools"
+          cmdline-tools-version: "11076708"
+          platforms: "android-36"
+          build-tools: "36.0.0"
+          cache: true
+          licenses: "android-sdk-preview-license|android-sdk-license"
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
