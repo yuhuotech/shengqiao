@@ -1,0 +1,8 @@
+{
+  "host": "127.0.0.1",
+  "port": 18765,
+  "provider_mapping": {"/": "/tmp/shengqiao-webdav-test"},
+  "simple_dc": {"user_mapping": {"*": {"test": {"password": "test-local-only", "roles": []}}}},
+  "http_authenticator": {"accept_basic": false, "accept_digest": true, "default_to_digest": true},
+  "verbose": 1
+}

@@ -1,0 +1,26 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="local.xiaomi.audiosync.probe">
+    <uses-sdk android:minSdkVersion="33" android:targetSdkVersion="36" />
+    <uses-permission android:name="miui.permission.ACCESS_RECORDS" />
+    <uses-permission android:name="com.hyperos.permission.READ_RECORD" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <queries>
+        <package android:name="com.android.soundrecorder" />
+        <provider android:authorities="records" />
+    </queries>
+    <application android:label="录音只读探测" android:debuggable="true" android:allowBackup="false"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <activity android:name=".ProbeActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

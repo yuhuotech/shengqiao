@@ -1,0 +1,5 @@
+# Copy this file to ~/.gradle/gradle.properties (do not commit the real one).
+# Passwords for the release keystore located in keystore/release.keystore.
+SHENGQIAO_STORE_PASSWORD=changeme-store-password
+SHENGQIAO_KEY_ALIAS=shengqiao
+SHENGQIAO_KEY_PASSWORD=changeme-key-password

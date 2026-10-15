@@ -1,0 +1,22 @@
+.gradle/
+.kotlin/
+build/
+**/build/
+local.properties
+*.keystore
+*.jks
+gradle.properties
+keystore/*.keystore
+keystore/*.jks
+.DS_Store
+__pycache__/
+.venv/
+test-results/private/
+
+# Keystore files and gradle.properties (containing signing passwords) must never
+# be committed. Use the example file and store credentials in
+# ~/.gradle/gradle.properties or via repository secrets in CI.
+gradle.properties
+keystore/*.keystore
+keystore/*.jks
+keystore/.pwd.checksum
