@@ -33,8 +33,11 @@ jobs:
       - name: Decode release keystore from base64 secret
         env:
           KEYSTORE_BASE64: ${{ secrets.SHQ_RELEASE_KEYSTORE_BASE64 }}
-        if: env.KEYSTORE_BASE64 != ''
         run: |
+          if [[ -z "$KEYSTORE_BASE64" ]]; then
+            echo "::error::Missing secret SHQ_RELEASE_KEYSTORE_BASE64. Set the four SHQ_RELEASE_* secrets in repository settings before pushing tags." >&2
+            exit 1
+          fi
           mkdir -p keystore
           echo "$KEYSTORE_BASE64" | base64 -d > keystore/release.keystore
           shasum -a 256 keystore/release.keystore
