@@ -78,7 +78,7 @@ jobs:
           $ANDROID_HOME/build-tools/36.0.0/apksigner verify --verbose "$APK"
           echo "APK SHA-256: $(shasum -a 256 "$APK" | awk '{print $1}')"
 
-      - name: Rename and upload artifacts
+      - name: Rename artifacts
         env:
           VER: ${{ github.ref_name }}
         run: |
@@ -87,6 +87,20 @@ jobs:
           cp app/build/outputs/bundle/release/app-release.aab "xiaomi-shengqiao-release-${VER}.aab"
           ls -la
           shasum -a 256 "xiaomi-shengqiao-release-${VER}.apk" "xiaomi-shengqiao-release-${VER}.aab"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xiaomi-shengqiao-release-apk
+          path: xiaomi-shengqiao-release-${{ github.ref_name }}.apk
+          if-no-files-found: error
+
+      - name: Upload AAB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xiaomi-shengqiao-release-aab
+          path: xiaomi-shengqiao-release-${{ github.ref_name }}.aab
+          if-no-files-found: error
 
   publish:
     name: publish-github-release
