@@ -78,18 +78,25 @@ jobs:
           $ANDROID_HOME/build-tools/36.0.0/apksigner verify --verbose "$APK"
           echo "APK SHA-256: $(shasum -a 256 "$APK" | awk '{print $1}')"
 
+      - name: Rename artifacts for distribution
+        run: |
+          VER="${GITHUB_REF_NAME#v}"
+          cp app/build/outputs/apk/release/app-release.apk "xiaomi-shengqiao-release-${VER}.apk"
+          cp app/build/outputs/bundle/release/app-release.aab "xiaomi-shengqiao-release-${VER}.aab"
+          ls -la
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-apk
-          path: app/build/outputs/apk/release/app-release.apk
+          name: xiaomi-shengqiao-release-apk
+          path: xiaomi-shengqiao-release-${GITHUB_REF_NAME#v}.apk
           if-no-files-found: error
 
       - name: Upload AAB artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-aab
-          path: app/build/outputs/bundle/release/app-release.aab
+          name: xiaomi-shengqiao-release-aab
+          path: xiaomi-shengqiao-release-${GITHUB_REF_NAME#v}.aab
           if-no-files-found: error
 
   publish:
@@ -100,27 +107,22 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: app-release-apk
-          path: dist
+          name: xiaomi-shengqiao-release-apk
 
       - uses: actions/download-artifact@v4
         with:
-          name: app-release-aab
-          path: dist
+          name: xiaomi-shengqiao-release-aab
 
-      - name: Compute APK metadata
-        id: meta
-        run: |
-          APK="dist/app-release.apk"
-          echo "version=$(./gradlew -q :app:printVersionName)" >> "$GITHUB_OUTPUT"
+      - name: List downloads
+        run: ls -la
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: ${{ steps.meta.outputs.version }}
+          name: ${{ github.ref_name }}
           generate_release_notes: true
           files: |
-            dist/app-release.apk
-            dist/app-release.aab
+            xiaomi-shengqiao-release-${{ github.ref_name }}.apk
+            xiaomi-shengqiao-release-${{ github.ref_name }}.aab
           fail_on_unmatched_files: true
