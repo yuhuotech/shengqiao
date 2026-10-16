@@ -28,13 +28,27 @@ jobs:
           cache: gradle
 
       - name: Set up Android SDK
-        uses: gradle/android-sdk-setup@v1
+        id: setup-android
+        uses: android-actions/setup-android@v3
         with:
           cmdline-tools-version: "11076708"
-          platforms: "android-36"
-          build-tools: "36.0.0"
-          cache: true
-          licenses: "android-sdk-preview-license|android-sdk-license"
+          # Default `packages` is "tools platform-tools" which fails on modern
+          # SDK images. Install only platform-tools here; the next step pulls
+          # platforms;android-36 and build-tools;36.0.0.
+          packages: "platform-tools"
+
+      - name: Install Android SDK platform and build-tools
+        run: |
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [[ ! -x "$sdkmanager" ]]; then
+            sdkmanager=$(find "$ANDROID_HOME" -name sdkmanager -type f | head -1)
+          fi
+          echo "Using $sdkmanager"
+          yes | "$sdkmanager" --licenses >/dev/null
+          "$sdkmanager" "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME/platforms" || true
+          ls "$ANDROID_HOME/build-tools" || true
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
