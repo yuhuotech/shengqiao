@@ -122,6 +122,7 @@ jobs:
       - name: Create GitHub release
         env:
           VER: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
           ls -la
