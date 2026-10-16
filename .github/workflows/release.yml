@@ -82,16 +82,11 @@ jobs:
         env:
           VER: ${{ github.ref_name }}
         run: |
+          set -e
           cp app/build/outputs/apk/release/app-release.apk "xiaomi-shengqiao-release-${VER}.apk"
           cp app/build/outputs/bundle/release/app-release.aab "xiaomi-shengqiao-release-${VER}.aab"
           ls -la
-          APK="xiaomi-shengqiao-release-${VER}.apk"
-          AAB="xiaomi-shengqiao-release-${VER}.aab"
-          echo "APK_SHA256=$(shasum -a 256 "$APK" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-          echo "AAB_SHA256=$(shasum -a 256 "$AAB" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-        outputs:
-          apk_sha256: ${{ steps.rename.outputs.APK_SHA256 }}
-          aab_sha256: ${{ steps.rename.outputs.AAB_SHA256 }}
+          shasum -a 256 "xiaomi-shengqiao-release-${VER}.apk" "xiaomi-shengqiao-release-${VER}.aab"
 
   publish:
     name: publish-github-release
