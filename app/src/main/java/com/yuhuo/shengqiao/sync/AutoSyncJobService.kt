@@ -50,26 +50,34 @@ class AutoSyncJobService : JobService() {
                     val pending = canonical.filter { it.available && it.skipReason.isEmpty() && store.state(it, marks[it.id] ?: SyncMark(), config.obsidianDestination) != "已同步" }
                     if (pending.isEmpty()) result = "没有增量，无需上传（未访问 WebDAV）"
                     else {
-                        val client = WebDav(config, task.cancelled)
-                        val notes = WebDav(config.obsidianConfig, task.cancelled)
-                        task.abort = { client.abort(); notes.abort() }
                         var success = 0; var failures = 0
                         for (r in pending) {
                             if (task.cancelled.get()) throw InterruptedIOException("任务已让位手动操作")
                             try {
                                 TransferGate.background(task.cancelled) {
-                                    if (success == 0 && failures == 0) { client.prepare(); notes.prepare() }
                                     var mark = store.mark(config.destination, r.id)
                                     try {
-                                        SyncEngine(bridge, client, task.cancelled, ObsidianSync(notes, config.obsidianDestination)) { _, _, _ -> }
-                                            .upload(r, mark) { receipt -> mark = receipt; store.saveMark(config.destination, r.id, receipt) }
+                                        NetworkRetry.run(task.cancelled, onRetry = { attempt, e ->
+                                            log.append("连接中断（${e.javaClass.simpleName}），正在第 ${attempt + 1} 次尝试")
+                                        }) {
+                                            val client = WebDav(config, task.cancelled)
+                                            val notes = WebDav(config.obsidianConfig, task.cancelled)
+                                            task.abort = { client.abort(); notes.abort() }
+                                            client.prepare(); notes.prepare()
+                                            mark = store.mark(config.destination, r.id)
+                                            SyncEngine(bridge, client, task.cancelled, ObsidianSync(notes, config.obsidianDestination)) { _, _, _ -> }
+                                                .upload(r, mark) { receipt -> mark = receipt; store.saveMark(config.destination, r.id, receipt) }
+                                        }
                                     } catch (e: Exception) {
                                         if (!task.cancelled.get()) store.saveMark(config.destination, r.id, mark.copy(error = e.message?.take(200).orEmpty()))
                                         throw e
                                     }
                                 }
                                 success++
-                            } catch (e: Exception) { if (task.cancelled.get() || e is InterruptedIOException) throw e; failures++ }
+                            } catch (e: Exception) {
+                                if (task.cancelled.get() || e is InterruptedIOException && e !is java.net.SocketTimeoutException) throw e
+                                failures++
+                            }
                         }
                         result = "自动同步结束 · $success 条已同步 · $failures 条失败"
                     }

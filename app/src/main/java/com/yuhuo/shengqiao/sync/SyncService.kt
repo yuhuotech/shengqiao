@@ -55,7 +55,7 @@ class SyncService : Service() {
     override fun onBind(intent: Intent?) = null
     override fun onCreate() {
         super.onCreate()
-        settings = Settings(this); trace = WebDavTrace(this, "task-diagnostic.log"); trace.reset()
+        settings = Settings(this); trace = WebDavTrace(this, "task-diagnostic.log")
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel("sync", "同步进度", NotificationManager.IMPORTANCE_LOW))
     }
@@ -164,6 +164,8 @@ class SyncService : Service() {
             var mark = SyncMark()
             var config: DavConfig? = null
             var recording: Recording? = null
+            var stage = "准备同步"
+            var networkFailure = ""
             try { SyncDependencies.store(this).use { store ->
                 try {
                     if (ticket.cancelled.get()) throw InterruptedIOException()
@@ -177,19 +179,38 @@ class SyncService : Service() {
                     check(capabilities != null) { "网络未连接，已保留本地数据" }
                     check(!config!!.wifiOnly || capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) { "已启用仅 Wi-Fi 同步，请连接 Wi-Fi 后重试" }
                     val bridge = SyncDependencies.bridge()
-                    val client = WebDav(config!!, ticket.cancelled)
-                    val notes = WebDav(config!!.obsidianConfig, ticket.cancelled)
-                    ticket.abort = { client.abort(); notes.abort() }
                     TransferGate.manual {
-                        progress(ticket, "连接 WebDAV…", 0, 0)
-                        client.prepare(); notes.prepare()
-                        mark = store.mark(config!!.destination, r.id)
-                        SyncEngine(bridge, client, ticket.cancelled, ObsidianSync(notes, config!!.obsidianDestination)) { step, done, total ->
-                            progress(ticket, step, done, total)
-                        }.upload(r, mark) { receipt -> mark = receipt; store.saveMark(config!!.destination, r.id, receipt) }
+                        NetworkRetry.run(ticket.cancelled, onRetry = { attempt, e ->
+                            trace.append("[重试] ${r.title.take(80)}；阶段：$stage；${e.javaClass.simpleName}" +
+                                (if (networkFailure.isNotEmpty()) "；$networkFailure" else "") +
+                                "；第 ${attempt + 1} 次尝试")
+                            progress(ticket, "连接中断，正在重试…", 0, 0)
+                        }) {
+                            networkFailure = ""
+                            val diagnostic: (String) -> Unit = { detail ->
+                                if (detail.startsWith("请求失败：") && networkFailure.isEmpty()) networkFailure = detail
+                            }
+                            val client = WebDav(config!!, ticket.cancelled, diagnostic)
+                            val notes = WebDav(config!!.obsidianConfig, ticket.cancelled, diagnostic)
+                            ticket.abort = { client.abort(); notes.abort() }
+                            stage = "检查主同步目录"
+                            progress(ticket, "连接 WebDAV…", 0, 0)
+                            client.prepare()
+                            stage = "检查 Obsidian 目录"
+                            notes.prepare()
+                            mark = store.mark(config!!.destination, r.id)
+                            SyncEngine(bridge, client, ticket.cancelled, ObsidianSync(notes, config!!.obsidianDestination)) { step, done, total ->
+                                stage = step
+                                progress(ticket, step, done, total)
+                            }.upload(r, mark) { receipt -> mark = receipt; store.saveMark(config!!.destination, r.id, receipt) }
+                        }
                     }
                     result = Outcome(true, r.transcript.isBlank(), record = r, stale = ticket.manual && store.recording(r.id) != r)
                 } catch (e: Exception) {
+                    if (!ticket.cancelled.get()) {
+                        trace.append("[失败] ${recording?.title.orEmpty().take(80)}；阶段：$stage；${e.javaClass.simpleName}" +
+                            if (networkFailure.isNotEmpty()) "；$networkFailure" else "")
+                    }
                     if (!ticket.cancelled.get() && recording != null && config != null) {
                         mark = store.mark(config!!.destination, recording!!.id)
                         store.saveMark(config!!.destination, recording!!.id, mark.copy(error = message(e)))
