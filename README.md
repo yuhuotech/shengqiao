@@ -99,13 +99,19 @@ Xiaomi Recorder App
 
 > 前置条件：Android 13+ 的小米 / 国产 ROM 手机，已安装并启动 [Shizuku 13.6+](https://shizuku.rikka.app/download/)，准备一个 WebDAV 服务（NAS、自建 Nextcloud、坚果云等都可以）。
 
-1. 在 [Releases](https://github.com/yuhuotech/shengqiao/releases/latest) 下载 `app-release.apk`，安装到手机。
-2. 打开「小米声桥」→ 顶部「设置」→ 填写 WebDAV 地址 / 账号 / 密码。
+1. 在 [Releases](https://github.com/yuhuotech/shengqiao/releases/latest) 下载 `xiaomi-shengqiao-release-v版本号.apk`，安装到手机。
+2. 打开「小米声桥」→ 顶部「设置」→「同步服务器」，填写 WebDAV 地址 / 账号 / 密码。
    - 主同步目录默认 `/shengqiao`，Obsidian 转写目录默认 `/obsidian/小米录音`，都可改。
    - 点「测试连接」会先登录、创建目录、写读回、清理验证文件，全过才提示「连接成功」。
 3. 返回首页 → 「连接 Shizuku」→ 同意授权。
 4. 「刷新录音」会一次性把本地录音和转写导入并展示在首页。
 5. 「一键同步」上传全部；或者点进某条录音，在详情页右上角「同步」单独补传（即使有自动同步在跑，单条也会立即执行）。
+
+## 检查应用更新
+
+在「设置」→「应用更新」中选择是否使用国内 GitHub 代理，点击「检查更新」。发现新版本后，需点击「更新」才会下载；下载完成后按系统提示允许安装并确认覆盖安装。应用不会自动检查或自动安装新版本。
+
+启用代理时，版本查询和安装包下载会依次尝试 `gh-proxy.com`、`gh-proxy.org` 和 `gh.llkk.cc`，代理为第三方服务，可能不可用或发生变化。下载完成后会核对 Release 提供的文件大小和 SHA-256，并检查包名、版本与已安装应用的签名；Android 安装器还会进行安装校验。请使用相同签名覆盖安装，不要先卸载旧版本。
 
 ## 构建与签名
 

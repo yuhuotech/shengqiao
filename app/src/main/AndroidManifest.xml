@@ -6,6 +6,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
     <queries><package android:name="moe.shizuku.privileged.api" /></queries>
     <application android:name=".SyncApp" android:label="小米声桥" android:icon="@mipmap/ic_launcher"
@@ -20,6 +21,11 @@
         </activity>
         <service android:name=".sync.SyncService" android:exported="false" android:foregroundServiceType="dataSync" />
         <service android:name=".sync.AutoSyncJobService" android:exported="true" android:permission="android.permission.BIND_JOB_SERVICE" />
+        <provider android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.updates" android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/update_paths" />
+        </provider>
         <provider android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="${applicationId}.shizuku" android:multiprocess="false"
             android:enabled="true" android:exported="true"

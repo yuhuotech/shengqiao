@@ -9,6 +9,7 @@ import android.widget.TextView
 import android.widget.ListView
 import android.widget.ScrollView
 import android.widget.CheckBox
+import android.widget.Switch
 import android.os.ParcelFileDescriptor
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -57,6 +58,7 @@ class UiFlowTest {
                     assertTrue("录音卡片不应被状态行撑高", first.height < 180 * context.resources.displayMetrics.density)
                 }
                 views().single { it.tag == "settings" }.performClick()
+                views().single { it.tag == "settings-server" }.performClick()
                 val inputs = views().filterIsInstance<EditText>()
                 assertEquals(5, inputs.size)
                 inputs[0].setText("https://nas.example.com/dav/")
@@ -67,7 +69,8 @@ class UiFlowTest {
                 views().filterIsInstance<Button>().single { it.text.toString() == "保存配置" }.performClick()
                 assertEquals("声桥/会议", Settings(context).load().folder)
                 assertEquals("/obsidian/测试仓库", Settings(context).load().obsidianFolder)
-                assertTrue(views().filterIsInstance<TextView>().any { it.text.toString() == "声桥" })
+                assertTrue(views().any { it.tag == "settings-server" })
+                views().single { it.tag == "toolbar-back" }.performClick()
                 assertTrue(views().filterIsInstance<Button>().any { it.text.toString() == "一键同步" })
             }
         } finally {
@@ -95,6 +98,43 @@ class UiFlowTest {
         return activity ?: error("声桥未进入前台")
     }
 
+    @Test fun settingsCategoriesNavigateAndPreserveNetworkPreference() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val settings = Settings(instrumentation.targetContext)
+        val prior = settings.load()
+        val activity = launch()
+        try {
+            instrumentation.runOnMainSync {
+                fun views() = descendants(activity.window.decorView)
+                views().single { it.tag == "settings" }.performClick()
+                for (category in listOf("server", "auto", "update", "access")) {
+                    assertTrue(views().any { it.tag == "settings-$category" })
+                }
+                views().single { it.tag == "settings-auto" }.performClick()
+                val wifi = views().filterIsInstance<Switch>().single { it.tag == "sync-wifi-only" }
+                wifi.isChecked = !prior.wifiOnly
+                assertEquals(!prior.wifiOnly, settings.load().wifiOnly)
+                views().single { it.tag == "toolbar-back" }.performClick()
+                views().single { it.tag == "settings-server" }.performClick()
+                val inputs = views().filterIsInstance<EditText>()
+                inputs[0].setText("https://nas.example.com/dav/")
+                views().filterIsInstance<Button>().single { it.text == "保存配置" }.performClick()
+                assertEquals(!prior.wifiOnly, settings.load().wifiOnly)
+                views().single { it.tag == "settings-update" }.performClick()
+                assertTrue(views().any { it.tag == "check-update" })
+                assertTrue(views().any { it.tag == "update-proxy" })
+                views().single { it.tag == "toolbar-back" }.performClick()
+                views().single { it.tag == "settings-access" }.performClick()
+                assertTrue(views().filterIsInstance<Button>().any { it.text == "打开 / 授权 Shizuku" })
+                views().single { it.tag == "toolbar-back" }.performClick()
+                assertTrue(views().any { it.tag == "settings-server" })
+            }
+        } finally {
+            settings.save(prior)
+            instrumentation.runOnMainSync { activity.finish() }
+        }
+    }
+
     @Test fun passwordVisibilityTogglePreservesValueCursorAndDefaultsHiddenOnReopen() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val activity = launch()
@@ -102,6 +142,7 @@ class UiFlowTest {
             instrumentation.runOnMainSync {
                 fun views() = descendants(activity.window.decorView)
                 views().single { it.tag == "settings" }.performClick()
+                views().single { it.tag == "settings-server" }.performClick()
                 val field = views().filterIsInstance<EditText>().single { it.tag == "webdav-password" }
                 val toggle = views().filterIsInstance<android.widget.ImageButton>().single { it.tag == "password-visibility" }
                 assertTrue(field.transformationMethod is android.text.method.PasswordTransformationMethod)
@@ -117,7 +158,7 @@ class UiFlowTest {
                 assertEquals("Synthetic-test-only-321", field.text.toString())
                 assertEquals(4, field.selectionStart)
                 // Reopening creates a hidden field; the unsaved test value is discarded.
-                MainActivity::class.java.getDeclaredMethod("settingsPage").apply { isAccessible = true }.invoke(activity)
+                MainActivity::class.java.getDeclaredMethod("serverSettingsPage").apply { isAccessible = true }.invoke(activity)
                 assertTrue(views().filterIsInstance<EditText>().single { it.tag == "webdav-password" }
                     .transformationMethod is android.text.method.PasswordTransformationMethod)
             }
@@ -231,6 +272,7 @@ class UiFlowTest {
         try {
             instrumentation.runOnMainSync {
                 views().single { it.tag == "settings" }.performClick()
+                views().single { it.tag == "settings-server" }.performClick()
                 val inputs = views().filterIsInstance<EditText>()
                 assertEquals("/shengqiao", inputs[3].text.toString())
                 assertEquals("/obsidian/小米录音", inputs[4].text.toString())

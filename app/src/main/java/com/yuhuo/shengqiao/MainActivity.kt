@@ -15,6 +15,7 @@ import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Bundle
+import android.provider.Settings as AndroidSettings
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
@@ -33,7 +34,10 @@ import com.yuhuo.shengqiao.ui.Appearance
 import com.yuhuo.shengqiao.ui.RecordingPlayer
 import com.yuhuo.shengqiao.ui.CollapsiblePanel
 import com.yuhuo.shengqiao.ui.PanelListView
+import com.yuhuo.shengqiao.update.ReleaseClient
+import androidx.core.content.FileProvider
 import rikka.shizuku.Shizuku
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -64,6 +68,9 @@ class MainActivity : Activity() {
     private lateinit var chips: LinearLayout
     private val worker = Executors.newSingleThreadExecutor()
     private val uiWorker = Executors.newFixedThreadPool(2)
+    private val updateWorker = Executors.newSingleThreadExecutor()
+    private var updateBusy = false
+    private var pendingUpdateInstall = false
     private var homeRoot: LinearLayout? = null
     private var displayStates = emptyMap<String, String>()
     private var refreshInFlight = false
@@ -114,6 +121,7 @@ class MainActivity : Activity() {
         super.onCreate(state)
         search = state?.getString("search").orEmpty()
         filter = state?.getString("filter") ?: "全部"
+        pendingUpdateInstall = state?.getBoolean("pendingUpdateInstall") ?: false
         restoreCollapsed = state?.getBoolean("homeCollapsed") ?: false
         if (state != null) restoredPosition = state.getInt("listPosition") to state.getInt("listOffset")
         store = Store(this); settings = Settings(this)
@@ -130,7 +138,7 @@ class MainActivity : Activity() {
         Shizuku.addBinderDeadListener(binderDead)
         Shizuku.addRequestPermissionResultListener(permission)
         onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT) {
-            if (page != "home") home() else finish()
+            navigateBack()
         }
         home()
     }
@@ -138,6 +146,7 @@ class MainActivity : Activity() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putString("search", search); outState.putString("filter", filter)
+        outState.putBoolean("pendingUpdateInstall", pendingUpdateInstall)
         outState.putBoolean("homeCollapsed", homePanel?.canExpand == true)
         if (::list.isInitialized) {
             outState.putInt("listPosition", list.firstVisiblePosition)
@@ -250,7 +259,7 @@ class MainActivity : Activity() {
                 theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, ripple, true)
                 setBackgroundResource(ripple.resourceId)
                 elevation = 0f
-                setOnClickListener { home() }
+                setOnClickListener { navigateBack() }
             }, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.START or Gravity.CENTER_VERTICAL))
             togglePanel?.let { toolbar.addView(panelToggle(it), FrameLayout.LayoutParams(dp(48), dp(48), Gravity.END or Gravity.CENTER_VERTICAL)) }
             shell.addView(toolbar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)).apply {
@@ -620,9 +629,44 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun navigateBack() {
+        when {
+            page.startsWith("settings-") -> settingsPage()
+            page != "home" -> home()
+            else -> finish()
+        }
+    }
+
     private fun settingsPage() {
         page = "settings"
-        base("同步设置", back = true)
+        base("设置", back = true)
+        val content = column()
+        fun entry(title: String, summary: String, id: String, action: () -> Unit) {
+            val item = row().apply {
+                tag = "settings-$id"
+                setPadding(dp(16), dp(12), dp(16), dp(12))
+                background = rounded(surface, 12)
+                isClickable = true; isFocusable = true
+                setOnClickListener { action() }
+            }
+            val labels = column()
+            labels.add(text(title, 15f, bold = true))
+            labels.add(text(summary, 12f, muted), top = 4)
+            item.add(labels, width = 0, weight = 1f)
+            item.add(text("›", 22f, muted).apply { gravity = Gravity.CENTER }, width = dp(28))
+            content.add(item, top = 10)
+        }
+        entry("同步服务器", if (config.configured) "已配置 WebDAV · 管理目录与连接" else "尚未配置 WebDAV", "server") { serverSettingsPage() }
+        entry("自动同步", if (AutoSync.enabled(this)) "已开启 · 管理同步与网络条件" else "已关闭 · 管理同步与网络条件", "auto") { autoSettingsPage() }
+        entry("应用更新", "当前版本 ${BuildConfig.VERSION_NAME} · 手动检查更新", "update") { updateSettingsPage() }
+        entry("读取授权", if (BridgeClient.ready()) "读取服务已就绪" else "需要连接或授权 Shizuku", "access") { accessSettingsPage() }
+        content.add(text("声桥 ${BuildConfig.VERSION_NAME}", 11f, muted).apply { gravity = Gravity.CENTER }, top = 24)
+        shell.add(ScrollView(this).apply { addView(content) }, height = 0, weight = 1f, top = 8)
+    }
+
+    private fun serverSettingsPage() {
+        page = "settings-server"
+        base("同步服务器", back = true)
         val form = column()
         val trace = com.yuhuo.shengqiao.data.WebDavTrace(this)
         fun input(label: String, value: String, hint: String, secret: Boolean = false): EditText {
@@ -672,13 +716,12 @@ class MainActivity : Activity() {
         val folder = input("主同步目录", config.folder, "/shengqiao")
         val obsidianFolder = input("Obsidian 转写目录", config.obsidianFolder, "/obsidian/小米录音")
         form.add(text("两个目录均相对于上面的 WebDAV 根目录，自动创建。Markdown 按录音创建月份归档，例如：\n/obsidian/小米录音/202610/10.13客满沟通会.md", 12f, muted), top = 8)
-        val wifi = CheckBox(this).apply { text = "仅在 Wi-Fi 下同步"; isChecked = config.wifiOnly }
         val http = CheckBox(this).apply { text = "允许 HTTP（未加密，适用于可信内网）"; isChecked = config.allowHttp }
-        form.add(wifi, top = 10); form.add(http)
+        form.add(http, top = 10)
         form.add(text("主目录保存音频、TXT、时间轴 JSON 和完成标记；Obsidian 目录另存 Markdown 转写，改名时同步移动原笔记。", 12f, muted), top = 8)
         val result = text("", 13f, blue).apply { tag = "connection-report"; setTextIsSelectable(true) }
         fun candidate(): DavConfig = DavConfig(url.text.toString().trim(), user.text.toString(), password.text.toString(),
-            folder.text.toString().trim().ifBlank { "/shengqiao" }, http.isChecked, wifi.isChecked,
+            folder.text.toString().trim().ifBlank { "/shengqiao" }, http.isChecked, config.wifiOnly,
             obsidianFolder.text.toString().trim().ifBlank { "/obsidian/小米录音" })
         var testing = false
         lateinit var testButton: Button
@@ -731,11 +774,18 @@ class MainActivity : Activity() {
             if (Operation.sync.busy) { toast("请等待当前同步结束"); return@button }
             try {
                 val value = candidate(); WebDav(value); WebDav(value.obsidianConfig); AutoSync.cancelForManual(); settings.save(value); configEpoch++; config = value
-                toast("配置已保存"); home()
+                toast("配置已保存"); settingsPage()
             } catch (e: Exception) { result.text = e.message }
         }
         form.add(saveButton, top = 12)
-        form.add(text("自动同步", 16f, bold = true), top = 24)
+        form.add(text("凭据使用 Android Keystore 加密保存在本机。", 11f, muted), top = 18)
+        shell.add(ScrollView(this).apply { addView(form) }, height = 0, weight = 1f, top = 8)
+    }
+
+    private fun autoSettingsPage() {
+        page = "settings-auto"
+        base("自动同步", back = true)
+        val form = column()
         form.add(Switch(this).apply {
             tag = "auto-sync-enabled"; text = "每小时自动检查并同步"; textSize = 14f
             isChecked = AutoSync.enabled(this@MainActivity)
@@ -744,15 +794,154 @@ class MainActivity : Activity() {
                 else runCatching { AutoSync.setEnabled(this@MainActivity, checked) }.onFailure { toast(it.message ?: "自动同步设置失败") }
             }
         }, height = dp(48), top = 8)
+        form.add(Switch(this).apply {
+            tag = "sync-wifi-only"; text = "手动同步仅使用 Wi-Fi"; textSize = 14f
+            isChecked = config.wifiOnly
+            setOnCheckedChangeListener { switch, checked ->
+                if (Operation.sync.busy) {
+                    toast("请等待当前同步结束")
+                    switch.setOnCheckedChangeListener(null); switch.isChecked = config.wifiOnly
+                    autoSettingsPage()
+                } else {
+                    runCatching {
+                        val updated = config.copy(wifiOnly = checked)
+                        AutoSync.cancelForManual(); settings.save(updated); config = updated; configEpoch++
+                    }.onFailure {
+                        toast(it.message ?: "网络设置保存失败")
+                        switch.setOnCheckedChangeListener(null); switch.isChecked = config.wifiOnly
+                        autoSettingsPage()
+                    }
+                }
+            }
+        }, height = dp(48), top = 8)
+        form.add(text("关闭后，手动同步也可以使用移动网络。自动同步始终需要非按流量计费的 Wi-Fi。", 12f, muted), top = 6)
         form.add(text("不常驻后台。系统约每小时调度，非按流量计费的 Wi-Fi 且电量充足时检查，有增量才上传。省电策略可能延后执行；Shizuku 不可用时跳过，手动操作优先。", 12f, muted), top = 6)
         val autoTime = settings.getInfo("autoLastRun").toLongOrNull()
         form.add(text(if (autoTime == null) "尚无自动检查记录" else "最近检查：${date(autoTime, true)}\n${settings.getInfo("autoLastResult")}", 12f, muted), top = 6)
-        form.add(text("手机读取授权", 16f, bold = true), top = 26)
+        shell.add(ScrollView(this).apply { addView(form) }, height = 0, weight = 1f, top = 8)
+    }
+
+    private fun updateSettingsPage() {
+        page = "settings-update"
+        base("应用更新", back = true)
+        val form = column()
+        form.add(text("当前版本 ${BuildConfig.VERSION_NAME}", 14f, bold = true), top = 10)
+        val proxy = Switch(this).apply {
+            tag = "update-proxy"
+            text = "使用国内 GitHub 代理"; textSize = 14f
+            isChecked = settings.getInfo("updateProxy", "true") == "true"
+            setOnCheckedChangeListener { _, checked -> settings.info("updateProxy", checked.toString()) }
+        }
+        form.add(proxy, height = dp(48), top = 8)
+        form.add(text("手动检查新版本；启用代理后，检查和下载会依次尝试多个第三方代理。", 12f, muted), top = 6)
+        val updateStatus = text("", 12f, muted)
+        val updateButton = button("检查更新") {
+            if (updateBusy) { toast("正在处理更新"); return@button }
+            updateBusy = true
+            val useProxy = proxy.isChecked
+            updateStatus.text = "正在检查新版本…"
+            updateWorker.execute {
+                val result = runCatching { ReleaseClient().latest(useProxy) }
+                runOnUiThread {
+                    updateBusy = false
+                    if (isFinishing || isDestroyed || page != "settings-update") return@runOnUiThread
+                    result.onSuccess { release ->
+                        if (!ReleaseClient.newer(release.version, BuildConfig.VERSION_NAME)) {
+                            updateStatus.text = "当前已是最新版本（${BuildConfig.VERSION_NAME}）"
+                        } else {
+                            updateStatus.text = "发现新版本 ${release.version}"
+                            AlertDialog.Builder(this).setTitle("发现新版本 ${release.version}")
+                                .setMessage("当前版本 ${BuildConfig.VERSION_NAME}。点击更新后下载，并通过系统安装界面确认。")
+                                .setNegativeButton("稍后", null)
+                                .setPositiveButton("更新") { _, _ ->
+                                    downloadUpdate(release, proxy.isChecked, updateStatus)
+                                }.show()
+                        }
+                    }.onFailure { updateStatus.text = "检查更新失败：${it.message ?: "请稍后重试"}" }
+                }
+            }
+        }.apply { tag = "check-update" }
+        form.add(updateButton, top = 10)
+        form.add(updateStatus, top = 6)
+        shell.add(ScrollView(this).apply { addView(form) }, height = 0, weight = 1f, top = 8)
+    }
+
+    private fun accessSettingsPage() {
+        page = "settings-access"
+        base("读取授权", back = true)
+        val form = column()
+        form.add(text(if (BridgeClient.ready()) "读取服务已就绪" else "需要连接或授权 Shizuku", 14f, bold = true), top = 10)
         form.add(text("安装并启动 Shizuku 后，允许声桥读取录音。手机重启后可通过 USB 或自行选择无线调试重新启动服务。", 12f, muted), top = 8)
         form.add(button("打开 / 授权 Shizuku") { connectShizuku() }, top = 10)
         form.add(button("Shizuku 官方使用说明") { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://shizuku.rikka.app/zh-hans/guide/setup/"))) }, top = 8)
         form.add(text("声桥 ${BuildConfig.VERSION_NAME}  ·  仅同步到你配置的服务器\n凭据使用 Android Keystore 加密；不删除手机或 NAS 上的原始录音。", 11f, muted), top = 24)
         shell.add(ScrollView(this).apply { addView(form) }, height = 0, weight = 1f, top = 8)
+    }
+
+    private fun updateFile() = File(cacheDir, "updates/update.apk")
+
+    private fun downloadUpdate(release: com.yuhuo.shengqiao.update.Release, useProxy: Boolean, status: TextView) {
+        if (updateBusy) return
+        updateBusy = true
+        status.text = "正在下载更新…"
+        updateWorker.execute {
+            val result = runCatching {
+                val file = updateFile()
+                check(file.parentFile?.mkdirs() == true || file.parentFile?.isDirectory == true) { "无法创建下载目录" }
+                ReleaseClient().download(release, useProxy, file) { done, total ->
+                    val percent = (done * 100 / total).toInt()
+                    runOnUiThread { if (!isDestroyed && page == "settings-update") status.text = "正在下载更新：$percent%" }
+                }
+                validateUpdate(file, release.version)
+            }
+            runOnUiThread {
+                updateBusy = false
+                if (isDestroyed || isFinishing) return@runOnUiThread
+                result.onSuccess {
+                    status.text = "下载并校验完成"
+                    installUpdate()
+                }.onFailure {
+                    updateFile().delete()
+                    status.text = "更新失败：${it.message ?: "请重新检查更新"}"
+                }
+            }
+        }
+    }
+
+    private fun validateUpdate(file: File, expectedVersion: String? = null) {
+        val flags = PackageManager.GET_SIGNING_CERTIFICATES
+        val archive = packageManager.getPackageArchiveInfo(file.absolutePath, flags) ?: error("下载的文件不是有效的安装包")
+        val installed = packageManager.getPackageInfo(packageName, flags)
+        check(archive.packageName == packageName && archive.longVersionCode > installed.longVersionCode &&
+            (expectedVersion == null || archive.versionName == expectedVersion)) { "安装包的应用或版本不匹配" }
+        val installedSigners = installed.signingInfo?.apkContentsSigners?.map { it.toByteArray().toList() }?.toSet()
+        val archiveSigners = archive.signingInfo?.apkContentsSigners?.map { it.toByteArray().toList() }?.toSet()
+        check(!installedSigners.isNullOrEmpty() && installedSigners == archiveSigners) { "安装包签名与当前应用不一致" }
+    }
+
+    private fun installUpdate() {
+        try {
+            validateUpdate(updateFile())
+            if (!packageManager.canRequestPackageInstalls()) {
+                pendingUpdateInstall = true
+                startActivityForResult(Intent(AndroidSettings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:$packageName")), 102)
+                return
+            }
+            pendingUpdateInstall = false
+            val uri = FileProvider.getUriForFile(this, "$packageName.updates", updateFile())
+            startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/vnd.android.package-archive")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+        } catch (e: Exception) { pendingUpdateInstall = false; toast("无法安装更新：${e.message}") }
+    }
+
+    @Deprecated("Android install permission settings return a result through the activity")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 102 && pendingUpdateInstall) {
+            if (packageManager.canRequestPackageInstalls()) installUpdate()
+            else { pendingUpdateInstall = false; toast("未允许安装应用，请授权后重新更新") }
+        }
     }
 
     private fun connectShizuku() {
@@ -775,7 +964,7 @@ class MainActivity : Activity() {
         if (action == "scan" && Operation.scan.busy) { toast("正在刷新录音"); return }
         if (action == "sync" && id == null && Operation.sync.busy) { toast("批量同步正在进行；可以在详情优先同步单条"); return }
         if (!BridgeClient.ready()) { pendingAction = action to id; connectShizuku(); return }
-        if (action == "sync" && !config.configured) { settingsPage(); toast("请先配置 WebDAV"); return }
+        if (action == "sync" && !config.configured) { serverSettingsPage(); toast("请先配置 WebDAV"); return }
         if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 101)
         Operation.prepare(action, id)
@@ -817,6 +1006,6 @@ class MainActivity : Activity() {
         audioPlayer?.release(); audioPlayer = null
         unregisterReceiver(receiver); Shizuku.removeBinderReceivedListener(binderReceived)
         Shizuku.removeBinderDeadListener(binderDead); Shizuku.removeRequestPermissionResultListener(permission)
-        activeTest?.abort(); worker.shutdown(); uiWorker.shutdownNow(); store.close(); super.onDestroy()
+        activeTest?.abort(); worker.shutdown(); uiWorker.shutdownNow(); updateWorker.shutdownNow(); store.close(); super.onDestroy()
     }
 }

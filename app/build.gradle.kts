@@ -7,8 +7,8 @@ android {
         applicationId = "com.yuhuo.shengqiao"
         minSdk = 33
         targetSdk = 36
-        versionCode = 15
-        versionName = "0.5.3"
+        versionCode = 16
+        versionName = "0.5.4"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildFeatures { aidl = true; buildConfig = true }
@@ -52,6 +52,7 @@ android {
 }
 
 dependencies {
+    implementation("androidx.core:core:1.13.1")
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
