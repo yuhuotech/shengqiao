@@ -5,6 +5,7 @@ import com.yuhuo.shengqiao.bridge.IRecorderBridge
 import com.yuhuo.shengqiao.data.Recording
 import com.yuhuo.shengqiao.data.RecordingScanner
 import com.yuhuo.shengqiao.data.SyncMark
+import com.yuhuo.shengqiao.data.hash
 import org.json.JSONObject
 import java.io.InterruptedIOException
 import java.util.concurrent.atomic.AtomicBoolean
@@ -12,7 +13,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 class SyncEngine(private val bridge: IRecorderBridge, private val dav: WebDav,
                  private val cancelled: AtomicBoolean, private val obsidian: ObsidianSync? = null,
                  private val progress: (String, Long, Long) -> Unit) {
-    fun upload(r: Recording, old: SyncMark, save: (SyncMark) -> Unit): SyncMark {
+    fun upload(r: Recording, old: SyncMark, save: (SyncMark) -> Unit): SyncMark =
+        upload(r, old, RemoteSyncIndex(allowFastPath = false), {}, save)
+
+    fun upload(r: Recording, old: SyncMark, remoteIndex: RemoteSyncIndex,
+               ensurePrepared: () -> Unit, save: (SyncMark) -> Unit): SyncMark {
         if (cancelled.get()) throw InterruptedIOException("同步已停止")
         val before = bridge.fileInfo(r.path)
         check(before[0] > 0) { "音频不存在或为空，请刷新录音列表" }
@@ -22,6 +27,22 @@ class SyncEngine(private val bridge: IRecorderBridge, private val dav: WebDav,
             r.contentSha256 else RecordingScanner.sha256(r, bridge, cancelled)
         check(before.contentEquals(bridge.fileInfo(r.path))) { "录音在核对时发生变化，请刷新后重试" }
         val directory = old.remoteId.ifBlank { r.id }
+        val names = RemoteNames.files(r)
+        val textHash = r.transcriptHash
+        val textPlainHash = if (textHash.isEmpty()) "" else hash(r.transcript)
+        val noteFingerprint = if (r.transcript.isNotBlank() && obsidian != null)
+            MarkdownExport.fingerprint(r, obsidian.destination) else ""
+        progress("比较远程增量索引", 0, 0)
+        val cached = if (remoteIndex.allowFastPath) remoteIndex.entry(dav, r.id) else null
+        if (cached != null && matchesIndex(cached, r, directory, before[0], before[1], contentHash,
+                names, textHash, textPlainHash, noteFingerprint, obsidian?.destination.orEmpty())) {
+            val completed = old.copy(audio = contentHash, text = textHash, summary = r.summaryHash,
+                metadata = r.metadataHash, time = cached.optLong("completedAt", old.time), error = "",
+                remoteId = directory, obsidian = noteFingerprint)
+            return completed.also(save)
+        }
+
+        ensurePrepared()
         dav.recordDirectory(directory)
         // Invalidate completion before changing any remote names or publishing anything.
         var mark = old.copy(error = "", metadata = "", remoteId = directory)
@@ -32,7 +53,6 @@ class SyncEngine(private val bridge: IRecorderBridge, private val dav: WebDav,
         if (remote != null) check(remote.optString("recordingId", remote.optString("sourceSha1")) in setOf(r.id, directory)) {
             "远程目录已属于另一条录音，已停止以避免覆盖"
         }
-        val names = RemoteNames.files(r)
         val originalManifest = remote?.toString()
         if (remote != null) {
             progress("核对并重命名远程文件", 0, 0)
@@ -55,7 +75,6 @@ class SyncEngine(private val bridge: IRecorderBridge, private val dav: WebDav,
         }
         audio.put("sourceSha1", r.sourceId).put("sourceModifiedAt", before[1])
         mark = mark.copy(audio = audio.getString("sha256")); save(mark)
-        val textHash = r.transcriptHash
         val textJson = "$directory/${names.getString("transcriptJson")}"
         val textPlain = "$directory/${names.getString("transcriptText")}"
         fun remoteTextComplete(path: String, value: String) = dav.exists(path, value.toByteArray(Charsets.UTF_8).size.toLong())
@@ -78,20 +97,86 @@ class SyncEngine(private val bridge: IRecorderBridge, private val dav: WebDav,
         val manifest = JSONObject().put("schemaVersion", 2).put("recordingId", r.id)
             .put("sourceSha1", r.sourceId).put("contentSha256", contentHash).put("title", r.title).put("files", names)
             .put("audio", audio).put("transcriptHash", textHash).put("summaryHash", r.summaryHash)
+            .put("transcriptJsonHash", textHash).put("transcriptTextHash", textPlainHash)
             .put("metadataHash", r.metadataHash).put("transcriptAvailable", textHash.isNotEmpty())
             .put("completedAt", System.currentTimeMillis())
         val original = originalManifest?.let { JSONObject(it) }
         val unchanged = original != null && original.optInt("schemaVersion") == 2 && original.optString("title") == r.title &&
             original.optString("sourceSha1") == r.sourceId && original.optString("transcriptHash") == textHash &&
+            original.optString("transcriptJsonHash", original.optString("transcriptHash")) == textHash &&
+            original.optString("transcriptTextHash") == textPlainHash &&
             original.optString("summaryHash") == r.summaryHash && original.optString("metadataHash") == r.metadataHash &&
             original.optJSONObject("files")?.toString() == names.toString() &&
             original.optJSONObject("audio")?.toString() == audio.toString()
         check(before.contentEquals(bridge.fileInfo(r.path))) { "音频在同步过程中变化，请刷新重试" }
         if (!unchanged) dav.putText("$directory/manifest.json", manifest.toString())
+        var noteReceipt: ObsidianReceipt? = null
         if (obsidian != null && r.transcript.isNotBlank()) {
             progress("同步 Obsidian Markdown", 0, 0)
-            mark = mark.copy(obsidian = obsidian.upload(r)); save(mark)
+            noteReceipt = obsidian.uploadWithReceipt(r)
+            mark = mark.copy(obsidian = noteReceipt.fingerprint); save(mark)
         }
-        return mark.copy(metadata = r.metadataHash, time = System.currentTimeMillis(), error = "").also(save)
+        val completedAt = System.currentTimeMillis()
+        val completed = mark.copy(metadata = r.metadataHash, time = completedAt, error = "")
+        remoteIndex.put(dav, r.id, indexRecord(r, directory, before[0], before[1], contentHash, names,
+            audio.optString("fileSha1"), textHash, textPlainHash, noteReceipt, obsidian?.destination.orEmpty(), completedAt))
+        return completed.also(save)
+    }
+
+    private fun matchesIndex(entry: JSONObject, r: Recording, directory: String, audioBytes: Long,
+                             sourceModifiedAt: Long, audioHash: String, names: JSONObject,
+                             transcriptJsonHash: String, transcriptTextHash: String,
+                             noteFingerprint: String, noteDestination: String): Boolean {
+        if (entry.optInt("schemaVersion") != 1 || entry.optString("recordingId") != r.id ||
+            entry.optString("remoteDirectory") != directory || entry.optString("title") != r.title ||
+            entry.optString("sourceSha1") != r.sourceId || entry.optString("contentSha256") != audioHash ||
+            entry.optLong("sourceModifiedAt", -1) != sourceModifiedAt) return false
+        val indexedNames = entry.optJSONObject("files") ?: return false
+        for (key in listOf("audio", "transcriptText", "transcriptJson", "summary"))
+            if (indexedNames.optString(key) != names.optString(key)) return false
+        if (indexedNames.optString("metadata") != "metadata.json" ||
+            indexedNames.optString("manifest") != "manifest.json") return false
+        val hashes = entry.optJSONObject("hashes") ?: return false
+        if (hashes.optString("audio") != audioHash || hashes.optString("transcriptJson") != transcriptJsonHash ||
+            hashes.optString("transcriptText") != transcriptTextHash || hashes.optString("summary") != r.summaryHash ||
+            hashes.optString("metadata") != r.metadataHash) return false
+        val sizes = entry.optJSONObject("bytes") ?: return false
+        if (sizes.optLong("audio", -1) != audioBytes ||
+            sizes.optLong("transcriptJson", -1) != (if (transcriptJsonHash.isEmpty()) 0 else r.transcriptJson.toByteArray(Charsets.UTF_8).size.toLong()) ||
+            sizes.optLong("transcriptText", -1) != (if (transcriptTextHash.isEmpty()) 0 else r.transcript.toByteArray(Charsets.UTF_8).size.toLong()) ||
+            sizes.optLong("summary", -1) != (if (r.summaryHash.isEmpty()) 0 else r.summary.toByteArray(Charsets.UTF_8).size.toLong()) ||
+            sizes.optLong("metadata", -1) != r.metadata.toByteArray(Charsets.UTF_8).size.toLong()) return false
+        val notes = entry.optJSONObject("obsidian") ?: return false
+        if (noteFingerprint.isEmpty()) return notes.optString("fingerprint").isEmpty()
+        return notes.optString("destination") == noteDestination && notes.optString("fingerprint") == noteFingerprint &&
+            notes.optString("path").isNotBlank() && notes.optString("sha256").matches(Regex("[a-f0-9]{64}")) &&
+            notes.optLong("bytes", -1) >= 0
+    }
+
+    private fun indexRecord(r: Recording, directory: String, audioBytes: Long, sourceModifiedAt: Long,
+                            audioHash: String, names: JSONObject, audioSha1: String, transcriptJsonHash: String,
+                            transcriptTextHash: String, note: ObsidianReceipt?, noteDestination: String,
+                            completedAt: Long): JSONObject {
+        val summaryBytes = if (r.summaryHash.isEmpty()) 0L else r.summary.toByteArray(Charsets.UTF_8).size.toLong()
+        val transcriptJsonBytes = if (transcriptJsonHash.isEmpty()) 0L else r.transcriptJson.toByteArray(Charsets.UTF_8).size.toLong()
+        val transcriptTextBytes = if (transcriptTextHash.isEmpty()) 0L else r.transcript.toByteArray(Charsets.UTF_8).size.toLong()
+        val files = JSONObject(names.toString()).put("metadata", "metadata.json").put("manifest", "manifest.json")
+        if (note?.path?.isNotBlank() == true) files.put("obsidianMarkdown", note.path)
+        return JSONObject().put("schemaVersion", 1).put("recordingId", r.id).put("remoteDirectory", directory)
+            .put("title", r.title).put("sourceSha1", r.sourceId).put("sourceModifiedAt", sourceModifiedAt)
+            .put("contentSha256", audioHash).put("files", files)
+            .put("hashes", JSONObject().put("audio", audioHash).put("audioSha1", audioSha1)
+                .put("transcriptJson", transcriptJsonHash).put("transcriptText", transcriptTextHash)
+                .put("summary", r.summaryHash).put("metadata", r.metadataHash)
+                .put("obsidianMarkdown", note?.sha256.orEmpty()))
+            .put("bytes", JSONObject().put("audio", audioBytes).put("transcriptJson", transcriptJsonBytes)
+                .put("transcriptText", transcriptTextBytes).put("summary", summaryBytes)
+                .put("metadata", r.metadata.toByteArray(Charsets.UTF_8).size.toLong())
+                .put("obsidianMarkdown", note?.bytes ?: 0L))
+            .put("transcriptAvailable", transcriptJsonHash.isNotEmpty())
+            .put("obsidian", JSONObject().put("destination", noteDestination)
+                .put("fingerprint", note?.fingerprint.orEmpty()).put("path", note?.path.orEmpty())
+                .put("sha256", note?.sha256.orEmpty()).put("bytes", note?.bytes ?: 0L))
+            .put("completedAt", completedAt)
     }
 }

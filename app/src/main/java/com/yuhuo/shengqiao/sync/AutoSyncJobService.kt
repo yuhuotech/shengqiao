@@ -51,6 +51,8 @@ class AutoSyncJobService : JobService() {
                     if (pending.isEmpty()) result = "没有增量，无需上传（未访问 WebDAV）"
                     else {
                         var success = 0; var failures = 0
+                        val remoteIndex = RemoteSyncIndex(deferWrites = true)
+                        var preparedDestination = ""
                         for (r in pending) {
                             if (task.cancelled.get()) throw InterruptedIOException("任务已让位手动操作")
                             try {
@@ -63,10 +65,18 @@ class AutoSyncJobService : JobService() {
                                             val client = WebDav(config, task.cancelled)
                                             val notes = WebDav(config.obsidianConfig, task.cancelled)
                                             task.abort = { client.abort(); notes.abort() }
-                                            client.prepare(); notes.prepare()
+                                            val destinationKey = "${config.destination}\n${config.obsidianDestination}"
+                                            val ensurePrepared = {
+                                                if (preparedDestination != destinationKey) {
+                                                    client.prepare(); notes.prepare()
+                                                    preparedDestination = destinationKey
+                                                }
+                                            }
                                             mark = store.mark(config.destination, r.id)
                                             SyncEngine(bridge, client, task.cancelled, ObsidianSync(notes, config.obsidianDestination)) { _, _, _ -> }
-                                                .upload(r, mark) { receipt -> mark = receipt; store.saveMark(config.destination, r.id, receipt) }
+                                                .upload(r, mark, remoteIndex, ensurePrepared) { receipt ->
+                                                    mark = receipt; store.saveMark(config.destination, r.id, receipt)
+                                                }
                                         }
                                     } catch (e: Exception) {
                                         if (!task.cancelled.get()) store.saveMark(config.destination, r.id, mark.copy(error = e.message?.take(200).orEmpty()))
@@ -79,7 +89,14 @@ class AutoSyncJobService : JobService() {
                                 failures++
                             }
                         }
-                        result = "自动同步结束 · $success 条已同步 · $failures 条失败"
+                        var indexWarning = ""
+                        if (!task.cancelled.get() && remoteIndex.hasPendingChanges()) {
+                            runCatching { TransferGate.background(task.cancelled) { remoteIndex.flush() } }.onFailure {
+                                indexWarning = " · 远程索引缓存更新失败"
+                                log.append("索引更新失败：${it.message?.take(160) ?: it.javaClass.simpleName}")
+                            }
+                        }
+                        result = "自动同步结束 · $success 条已同步 · $failures 条失败$indexWarning"
                     }
                 }
             } catch (e: Exception) {

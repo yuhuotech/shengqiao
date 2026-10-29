@@ -197,12 +197,13 @@ class WebDav(private val config: DavConfig, private val cancelled: AtomicBoolean
         mkdir(address(path))
     }
     fun readManifest(id: String): JSONObject? = readJson("$id/manifest.json")
-    fun readJson(path: String): JSONObject? {
+    fun readJson(path: String, maxBytes: Int = 262144): JSONObject? {
         request(address(path), "GET").use { response ->
             if (response.code == 404) return null
             if (response.code != 200) failure(response)
-            val bytes = response.body!!.byteStream().use { it.readNBytes(262145) }
-            require(bytes.size <= 262144) { "服务器完成标记格式异常" }
+            require(maxBytes > 0) { "服务器文件读取限制无效" }
+            val bytes = response.body!!.byteStream().use { it.readNBytes(maxBytes + 1) }
+            require(bytes.size <= maxBytes) { "服务器完成标记超过读取限制" }
             return JSONObject(String(bytes, Charsets.UTF_8))
         }
     }

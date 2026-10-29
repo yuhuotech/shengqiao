@@ -99,6 +99,7 @@ class MainActivity : Activity() {
     private var detailError: TextView? = null
     private var detailSync: Button? = null
     private var detailReadPending = false
+    private var detailRefreshPending = false
     private data class RetainedList(val config: DavConfig, val records: List<Recording>, val marks: Map<String, SyncMark>,
         val states: Map<String, String>, val stamp: String?)
     override fun onRetainNonConfigurationInstance(): Any = RetainedList(config, records, marks, displayStates, cacheScan)
@@ -601,21 +602,34 @@ class MainActivity : Activity() {
     private fun renderDetailTask(r: Recording, mark: SyncMark) {
         val active = Operation.sync.running && Operation.currentId == r.id
         val queued = r.id in Operation.queuedIds
-        detailSync?.updateText(if (active) "同步中" else if (queued) "已排队" else "同步")
+        val state = store.state(r, mark, config.obsidianDestination)
+        val failed = Operation.results[r.id]?.failed == true
+        val buttonLabel = when {
+                active -> "同步中"
+                queued -> "排队中"
+                failed || state == "同步失败" -> "重试"
+                state == "已同步" -> "已同步"
+                state == "待更新" -> "更新"
+                else -> "同步"
+            }
+        detailSync?.apply {
+            updateText(buttonLabel)
+            contentDescription = if (buttonLabel == "已同步") "此条录音已同步，再次点击可核对" else "同步此条录音"
+        }
         detailState?.updateText(when {
             active -> Operation.sync.message + if (Operation.byteTotal > 0) "  ${bytes(Operation.bytes)}/${bytes(Operation.byteTotal)}" else ""
             queued -> "已加入优先同步，等待当前单条完成"
-            Operation.results[r.id]?.failed == true -> "同步失败 · 可点击同步重试"
-            Operation.results[r.id] != null -> Operation.results[r.id]!!.message
-            else -> store.state(r, mark, config.obsidianDestination) + if (r.transcript.isBlank()) " · 缺少转写" else ""
+            failed -> "同步失败 · 可点击重试（${Operation.results[r.id]?.message.orEmpty()}）"
+            else -> state + if (r.transcript.isBlank()) " · 缺少转写" else ""
         })
         detailError?.apply { updateText(mark.error); visibility = if (mark.error.isBlank()) View.GONE else View.VISIBLE }
     }
     private fun refreshDetail() {
         val id = detailId ?: return
         records.firstOrNull { it.id == id }?.let { renderDetailTask(it, marks[id] ?: SyncMark()) }
-        if (detailReadPending) return
+        if (detailReadPending) { detailRefreshPending = true; return }
         detailReadPending = true
+        detailRefreshPending = false
         val destination = config.destination
         uiWorker.execute {
             val pair = runCatching { store.recording(id)?.let { it to store.mark(destination, it.id) } }.getOrNull()
@@ -623,8 +637,14 @@ class MainActivity : Activity() {
                 detailReadPending = false
                 if (!isDestroyed && page == "detail" && detailId == id && pair != null) {
                     marks = marks + (id to pair.second)
+                    val state = store.state(pair.first, pair.second, config.obsidianDestination)
+                    if (displayStates[id] != state) {
+                        displayStates = displayStates + (id to state)
+                        listDirty = true
+                    }
                     renderDetailTask(pair.first, pair.second)
                 }
+                if (detailRefreshPending) { detailRefreshPending = false; refreshDetail() }
             }
         }
     }

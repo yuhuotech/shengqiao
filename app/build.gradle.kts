@@ -7,8 +7,8 @@ android {
         applicationId = "com.yuhuo.shengqiao"
         minSdk = 33
         targetSdk = 36
-        versionCode = 16
-        versionName = "0.5.4"
+        versionCode = 17
+        versionName = "0.5.5"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildFeatures { aidl = true; buildConfig = true }

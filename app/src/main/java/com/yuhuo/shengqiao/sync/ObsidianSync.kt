@@ -4,10 +4,14 @@ import com.yuhuo.shengqiao.data.Recording
 import com.yuhuo.shengqiao.data.hash
 import org.json.JSONObject
 
+data class ObsidianReceipt(val fingerprint: String, val path: String, val sha256: String, val bytes: Long)
+
 /** The hidden per-record receipt keeps flat Markdown names independent of recording identity. */
-class ObsidianSync(private val dav: WebDav, private val destination: String) {
-    fun upload(r: Recording): String {
-        if (r.transcript.isBlank()) return ""
+class ObsidianSync(private val dav: WebDav, val destination: String) {
+    fun upload(r: Recording): String = uploadWithReceipt(r).fingerprint
+
+    fun uploadWithReceipt(r: Recording): ObsidianReceipt {
+        if (r.transcript.isBlank()) return ObsidianReceipt("", "", "", 0)
         require(r.id.matches(Regex("[a-f0-9]{40}|[a-f0-9]{64}")))
         dav.ensureDirectory(".shengqiao")
         val statePath = ".shengqiao/${r.id}.json"
@@ -47,7 +51,7 @@ class ObsidianSync(private val dav: WebDav, private val destination: String) {
             dav.putText(desired, markdown, "text/markdown; charset=utf-8")
             dav.putText(statePath, reserved.put("hash", digest).put("bytes", bytes).toString())
         }
-        return MarkdownExport.fingerprint(r, destination)
+        return ObsidianReceipt(MarkdownExport.fingerprint(r, destination), desired, digest, bytes)
     }
 
     private fun recover(pendingPath: String, statePath: String, id: String) {

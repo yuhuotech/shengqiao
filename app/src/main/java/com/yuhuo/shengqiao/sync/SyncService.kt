@@ -33,6 +33,7 @@ class SyncService : Service() {
     private val scanner = Executors.newSingleThreadExecutor()
     private val uploader = Executors.newSingleThreadExecutor()
     private val queue = UploadQueue()
+    private var remoteIndex = RemoteSyncIndex(deferWrites = true)
     private var scanCancelled = AtomicBoolean(false)
     private lateinit var settings: Settings
     private lateinit var trace: WebDavTrace
@@ -45,6 +46,10 @@ class SyncService : Service() {
     private var skipped = 0
     private var preparationError = ""
     private var syncStopped = false
+    private var preparedDestination = ""
+    private var indexFlushStarted = false
+    private var indexFlushAttempted = false
+    private var indexWarning = ""
     private val outcomes = linkedMapOf<String, Outcome>()
     private val requestedDuringScan = mutableSetOf<String>()
     private val uploadedVersions = mutableMapOf<String, Recording>()
@@ -74,6 +79,8 @@ class SyncService : Service() {
                 val id = intent.getStringExtra("id")
                 if (syncStopped || !Operation.sync.running) {
                     outcomes.clear(); preparationError = ""; skipped = 0; syncStopped = false
+                    remoteIndex = RemoteSyncIndex(deferWrites = true)
+                    preparedDestination = ""; indexFlushStarted = false; indexFlushAttempted = false; indexWarning = ""
                 }
                 if (id == null) {
                     if (!batchWaiting && batchIds == null) {
@@ -157,6 +164,7 @@ class SyncService : Service() {
         if (queue.active != null) { publishQueue(); return }
         val ticket = queue.take()
         if (ticket == null) { finishUploads(); return }
+        indexFlushAttempted = false
         syncState(TaskState(running = true, currentId = ticket.id, message = if (ticket.manual) "优先同步 · 正在读取此条录音…" else "批量同步 · 正在读取录音…"))
         publishQueue()
         uploader.execute {
@@ -193,16 +201,21 @@ class SyncService : Service() {
                             val client = WebDav(config!!, ticket.cancelled, diagnostic)
                             val notes = WebDav(config!!.obsidianConfig, ticket.cancelled, diagnostic)
                             ticket.abort = { client.abort(); notes.abort() }
-                            stage = "检查主同步目录"
-                            progress(ticket, "连接 WebDAV…", 0, 0)
-                            client.prepare()
-                            stage = "检查 Obsidian 目录"
-                            notes.prepare()
                             mark = store.mark(config!!.destination, r.id)
+                            val destinationKey = "${config!!.destination}\n${config!!.obsidianDestination}"
+                            val ensurePrepared = {
+                                if (preparedDestination != destinationKey) {
+                                    stage = "检查主同步目录"; progress(ticket, "连接 WebDAV…", 0, 0); client.prepare()
+                                    stage = "检查 Obsidian 目录"; notes.prepare()
+                                    preparedDestination = destinationKey
+                                }
+                            }
                             SyncEngine(bridge, client, ticket.cancelled, ObsidianSync(notes, config!!.obsidianDestination)) { step, done, total ->
                                 stage = step
                                 progress(ticket, step, done, total)
-                            }.upload(r, mark) { receipt -> mark = receipt; store.saveMark(config!!.destination, r.id, receipt) }
+                            }.upload(r, mark, remoteIndex, ensurePrepared) { receipt ->
+                                mark = receipt; store.saveMark(config!!.destination, r.id, receipt)
+                            }
                         }
                     }
                     result = Outcome(true, r.transcript.isBlank(), record = r, stale = ticket.manual && store.recording(r.id) != r)
@@ -246,16 +259,38 @@ class SyncService : Service() {
     }
     private fun finishUploads() {
         if (batchWaiting || queue.busy || !Operation.sync.busy) return
+        if (remoteIndex.hasPendingChanges() && !indexFlushAttempted && !syncStopped) {
+            if (indexFlushStarted) return
+            indexFlushStarted = true; indexFlushAttempted = true
+            syncState(Operation.sync.copy(currentId = "", message = "正在保存远程增量索引…"))
+            val index = remoteIndex
+            uploader.execute {
+                val failure = runCatching { index.flush() }.exceptionOrNull()
+                post {
+                    indexFlushStarted = false
+                    if (failure == null) indexWarning = ""
+                    else {
+                        indexWarning = "远程索引缓存未更新，下次同步会重新核对"
+                        trace.append("[索引] 更新失败：${failure.message?.take(160) ?: failure.javaClass.simpleName}")
+                    }
+                    finishUploads()
+                    stopIfIdle()
+                }
+            }
+            return
+        }
         val selected = batchIds?.let { ids -> outcomes.filterKeys { it in ids } } ?: outcomes
         val ok = selected.values.count { it.success }; val missing = selected.values.count { it.success && it.missing }
         val failures = selected.values.count { !it.success }
-        val state = TaskState(failed = failures > 0 || preparationError.isNotEmpty() && !syncStopped && !preparationError.startsWith("刷新已停止"), message = when {
+        val message = when {
             syncStopped -> "同步已停止，已完成的文件会保留"
             preparationError.isNotEmpty() -> preparationError
             batchIds != null -> "同步结束 · $ok 条已同步 · $missing 条缺少转写 · $skipped 条跳过 · $failures 条失败"
             failures > 0 -> "单条同步失败：${selected.values.first { !it.success }.message}"
             else -> "单条同步完成 · $ok 条已同步" + if (missing > 0) " · $missing 条缺少转写" else ""
-        })
+        }
+        val state = TaskState(failed = failures > 0 || preparationError.isNotEmpty() && !syncStopped && !preparationError.startsWith("刷新已停止"),
+            message = message + if (indexWarning.isNotEmpty()) " · $indexWarning" else "")
         batchIds = null; syncState(state); complete("sync", state)
     }
     private fun stopUploads() {
