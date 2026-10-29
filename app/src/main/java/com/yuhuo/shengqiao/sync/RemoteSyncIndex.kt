@@ -1,5 +1,8 @@
 package com.yuhuo.shengqiao.sync
 
+import com.yuhuo.shengqiao.data.Recording
+import com.yuhuo.shengqiao.data.SyncMark
+import com.yuhuo.shengqiao.data.hash
 import org.json.JSONException
 import org.json.JSONObject
 
@@ -22,6 +25,46 @@ class RemoteSyncIndex(private val deferWrites: Boolean = false, val allowFastPat
         load(dav)
         if (dirty) writer = dav
         return records.optJSONObject(id)?.let { JSONObject(it.toString()) }
+    }
+
+    fun matches(entry: JSONObject, r: Recording, directory: String, audioBytes: Long,
+                sourceModifiedAt: Long, audioHash: String, noteDestination: String): Boolean {
+        val transcriptJsonHash = r.transcriptHash
+        val transcriptTextHash = if (transcriptJsonHash.isEmpty()) "" else hash(r.transcript)
+        val noteFingerprint = if (r.transcript.isNotBlank()) MarkdownExport.fingerprint(r, noteDestination) else ""
+        if (entry.optInt("schemaVersion") != 1 || entry.optString("recordingId") != r.id ||
+            entry.optString("remoteDirectory") != directory || entry.optString("title") != r.title ||
+            entry.optString("sourceSha1") != r.sourceId || entry.optString("contentSha256") != audioHash ||
+            entry.optLong("sourceModifiedAt", -1) != sourceModifiedAt) return false
+        val indexedNames = entry.optJSONObject("files") ?: return false
+        val names = RemoteNames.files(r)
+        for (key in listOf("audio", "transcriptText", "transcriptJson", "summary"))
+            if (indexedNames.optString(key) != names.optString(key)) return false
+        if (indexedNames.optString("metadata") != "metadata.json" ||
+            indexedNames.optString("manifest") != "manifest.json") return false
+        val hashes = entry.optJSONObject("hashes") ?: return false
+        if (hashes.optString("audio") != audioHash || hashes.optString("transcriptJson") != transcriptJsonHash ||
+            hashes.optString("transcriptText") != transcriptTextHash || hashes.optString("summary") != r.summaryHash ||
+            hashes.optString("metadata") != r.metadataHash) return false
+        val sizes = entry.optJSONObject("bytes") ?: return false
+        if (sizes.optLong("audio", -1) != audioBytes ||
+            sizes.optLong("transcriptJson", -1) != (if (transcriptJsonHash.isEmpty()) 0 else r.transcriptJson.toByteArray(Charsets.UTF_8).size.toLong()) ||
+            sizes.optLong("transcriptText", -1) != (if (transcriptTextHash.isEmpty()) 0 else r.transcript.toByteArray(Charsets.UTF_8).size.toLong()) ||
+            sizes.optLong("summary", -1) != (if (r.summaryHash.isEmpty()) 0 else r.summary.toByteArray(Charsets.UTF_8).size.toLong()) ||
+            sizes.optLong("metadata", -1) != r.metadata.toByteArray(Charsets.UTF_8).size.toLong()) return false
+        val notes = entry.optJSONObject("obsidian") ?: return false
+        if (noteFingerprint.isEmpty()) return notes.optString("fingerprint").isEmpty()
+        return notes.optString("destination") == noteDestination && notes.optString("fingerprint") == noteFingerprint &&
+            notes.optString("path").isNotBlank() && notes.optString("sha256").matches(Regex("[a-f0-9]{64}")) &&
+            notes.optLong("bytes", -1) >= 0
+    }
+
+    fun completedMark(entry: JSONObject, r: Recording, previous: SyncMark, directory: String,
+                      noteDestination: String): SyncMark {
+        val noteFingerprint = if (r.transcript.isNotBlank()) MarkdownExport.fingerprint(r, noteDestination) else ""
+        return previous.copy(audio = r.contentSha256, text = r.transcriptHash, summary = r.summaryHash,
+            metadata = r.metadataHash, time = entry.optLong("completedAt", previous.time), error = "",
+            remoteId = directory, obsidian = noteFingerprint)
     }
 
     @Synchronized fun put(dav: WebDav, id: String, entry: JSONObject) {

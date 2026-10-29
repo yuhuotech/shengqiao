@@ -14,6 +14,7 @@ object Operation {
     @Volatile var queuedIds = emptySet<String>()
     @Volatile var manualIds = emptySet<String>()
     @Volatile var results = emptyMap<String, ItemResult>()
+    @Volatile var currentWasSynced = false
     val running get() = scan.running || sync.running
     val starting get() = scan.starting || sync.starting
     private val foreground get() = if (sync.busy) sync else if (scan.busy) scan else last
@@ -28,7 +29,10 @@ object Operation {
         if (action == "scan") scan = scan.copy(starting = true, failed = false, message = "正在准备刷新录音…")
         else {
             if (id != null) { manualIds = manualIds + id; queuedIds = queuedIds + id; results = results - id }
-            if (!sync.busy) sync = TaskState(starting = true, message = if (id == null) "正在准备同步…" else "正在准备单条同步…")
+            if (!sync.busy) {
+                currentWasSynced = false
+                sync = TaskState(starting = true, message = if (id == null) "正在准备同步…" else "正在准备单条同步…")
+            }
         }
     }
 }

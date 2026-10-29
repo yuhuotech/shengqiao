@@ -30,15 +30,11 @@ class SyncEngine(private val bridge: IRecorderBridge, private val dav: WebDav,
         val names = RemoteNames.files(r)
         val textHash = r.transcriptHash
         val textPlainHash = if (textHash.isEmpty()) "" else hash(r.transcript)
-        val noteFingerprint = if (r.transcript.isNotBlank() && obsidian != null)
-            MarkdownExport.fingerprint(r, obsidian.destination) else ""
         progress("比较远程增量索引", 0, 0)
         val cached = if (remoteIndex.allowFastPath) remoteIndex.entry(dav, r.id) else null
-        if (cached != null && matchesIndex(cached, r, directory, before[0], before[1], contentHash,
-                names, textHash, textPlainHash, noteFingerprint, obsidian?.destination.orEmpty())) {
-            val completed = old.copy(audio = contentHash, text = textHash, summary = r.summaryHash,
-                metadata = r.metadataHash, time = cached.optLong("completedAt", old.time), error = "",
-                remoteId = directory, obsidian = noteFingerprint)
+        if (cached != null && remoteIndex.matches(cached, r, directory, before[0], before[1], contentHash,
+                obsidian?.destination.orEmpty())) {
+            val completed = remoteIndex.completedMark(cached, r, old, directory, obsidian?.destination.orEmpty())
             return completed.also(save)
         }
 
@@ -121,36 +117,6 @@ class SyncEngine(private val bridge: IRecorderBridge, private val dav: WebDav,
         remoteIndex.put(dav, r.id, indexRecord(r, directory, before[0], before[1], contentHash, names,
             audio.optString("fileSha1"), textHash, textPlainHash, noteReceipt, obsidian?.destination.orEmpty(), completedAt))
         return completed.also(save)
-    }
-
-    private fun matchesIndex(entry: JSONObject, r: Recording, directory: String, audioBytes: Long,
-                             sourceModifiedAt: Long, audioHash: String, names: JSONObject,
-                             transcriptJsonHash: String, transcriptTextHash: String,
-                             noteFingerprint: String, noteDestination: String): Boolean {
-        if (entry.optInt("schemaVersion") != 1 || entry.optString("recordingId") != r.id ||
-            entry.optString("remoteDirectory") != directory || entry.optString("title") != r.title ||
-            entry.optString("sourceSha1") != r.sourceId || entry.optString("contentSha256") != audioHash ||
-            entry.optLong("sourceModifiedAt", -1) != sourceModifiedAt) return false
-        val indexedNames = entry.optJSONObject("files") ?: return false
-        for (key in listOf("audio", "transcriptText", "transcriptJson", "summary"))
-            if (indexedNames.optString(key) != names.optString(key)) return false
-        if (indexedNames.optString("metadata") != "metadata.json" ||
-            indexedNames.optString("manifest") != "manifest.json") return false
-        val hashes = entry.optJSONObject("hashes") ?: return false
-        if (hashes.optString("audio") != audioHash || hashes.optString("transcriptJson") != transcriptJsonHash ||
-            hashes.optString("transcriptText") != transcriptTextHash || hashes.optString("summary") != r.summaryHash ||
-            hashes.optString("metadata") != r.metadataHash) return false
-        val sizes = entry.optJSONObject("bytes") ?: return false
-        if (sizes.optLong("audio", -1) != audioBytes ||
-            sizes.optLong("transcriptJson", -1) != (if (transcriptJsonHash.isEmpty()) 0 else r.transcriptJson.toByteArray(Charsets.UTF_8).size.toLong()) ||
-            sizes.optLong("transcriptText", -1) != (if (transcriptTextHash.isEmpty()) 0 else r.transcript.toByteArray(Charsets.UTF_8).size.toLong()) ||
-            sizes.optLong("summary", -1) != (if (r.summaryHash.isEmpty()) 0 else r.summary.toByteArray(Charsets.UTF_8).size.toLong()) ||
-            sizes.optLong("metadata", -1) != r.metadata.toByteArray(Charsets.UTF_8).size.toLong()) return false
-        val notes = entry.optJSONObject("obsidian") ?: return false
-        if (noteFingerprint.isEmpty()) return notes.optString("fingerprint").isEmpty()
-        return notes.optString("destination") == noteDestination && notes.optString("fingerprint") == noteFingerprint &&
-            notes.optString("path").isNotBlank() && notes.optString("sha256").matches(Regex("[a-f0-9]{64}")) &&
-            notes.optLong("bytes", -1) >= 0
     }
 
     private fun indexRecord(r: Recording, directory: String, audioBytes: Long, sourceModifiedAt: Long,

@@ -1,9 +1,12 @@
 package com.yuhuo.shengqiao.update
 
+import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import org.json.JSONObject
 import java.io.File
+import java.io.InterruptedIOException
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
@@ -16,13 +19,35 @@ class ReleaseClient(
         .readTimeout(30, TimeUnit.SECONDS).writeTimeout(30, TimeUnit.SECONDS)
         .followSslRedirects(false).build()
 ) {
+    @Volatile private var cancelled = false
+    @Volatile private var activeCall: Call? = null
+
+    fun cancel() {
+        cancelled = true
+        activeCall?.cancel()
+    }
+
+    private fun checkNotCancelled() {
+        if (cancelled || Thread.currentThread().isInterrupted) throw InterruptedIOException("更新下载已取消")
+    }
+
+    private fun <T> execute(request: Request, block: (Response) -> T): T {
+        checkNotCancelled()
+        val call = client.newCall(request)
+        activeCall = call
+        if (cancelled) call.cancel()
+        return try { call.execute().use(block) }
+        finally { if (activeCall === call) activeCall = null }
+    }
+
     private fun routes(url: String, useProxy: Boolean) = if (useProxy) proxies.map { it + url } else listOf(url)
 
     private fun <T> attempt(url: String, useProxy: Boolean, block: (String) -> T): T {
         var last: Exception? = null
         for (route in routes(url, useProxy)) {
+            checkNotCancelled()
             try { return block(route) } catch (e: Exception) {
-                if (Thread.currentThread().isInterrupted) throw e
+                if (cancelled || Thread.currentThread().isInterrupted) throw e
                 last = e
             }
         }
@@ -30,8 +55,8 @@ class ReleaseClient(
     }
 
     fun latest(useProxy: Boolean): Release = attempt(apiUrl, useProxy) { url ->
-        client.newCall(Request.Builder().url(url).header("Accept", "application/vnd.github+json")
-            .header("User-Agent", "ShengQiao-Updater").build()).execute().use { response ->
+        execute(Request.Builder().url(url).header("Accept", "application/vnd.github+json")
+            .header("User-Agent", "ShengQiao-Updater").build()) { response ->
             check(response.isSuccessful) { "HTTP ${response.code}" }
             val body = response.body ?: error("版本信息为空")
             val bytes = body.byteStream().use { it.readNBytes(1024 * 1024 + 1) }
@@ -59,7 +84,7 @@ class ReleaseClient(
     fun download(release: Release, useProxy: Boolean, target: File, progress: (Long, Long) -> Unit = { _, _ -> }) {
         attempt(release.apkUrl, useProxy) { url ->
             try {
-                client.newCall(Request.Builder().url(url).header("User-Agent", "ShengQiao-Updater").build()).execute().use { response ->
+                execute(Request.Builder().url(url).header("User-Agent", "ShengQiao-Updater").build()) { response ->
                     check(response.isSuccessful) { "HTTP ${response.code}" }
                     val body = response.body ?: error("下载内容为空")
                     val digest = MessageDigest.getInstance("SHA-256")
@@ -68,7 +93,7 @@ class ReleaseClient(
                         body.byteStream().use { input ->
                             val buffer = ByteArray(64 * 1024)
                             while (true) {
-                                if (Thread.currentThread().isInterrupted) throw InterruptedException()
+                                checkNotCancelled()
                                 val n = input.read(buffer)
                                 if (n < 0) break
                                 count += n

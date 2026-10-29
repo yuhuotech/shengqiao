@@ -42,7 +42,13 @@ class SyncService : Service() {
     private var destroyed = false
     private var lastNotify = 0L
     private var batchWaiting = false
+    private var batchIndexing = false
+    private var batchIndexCancelled = AtomicBoolean(false)
+    @Volatile private var batchIndexAbort: (() -> Unit)? = null
+    private var pendingBatchIndexRecords: List<Recording>? = null
     private var batchIds: Set<String>? = null
+    private var batchIndexHits = 0
+    private var batchIndexQueued = 0
     private var skipped = 0
     private var preparationError = ""
     private var syncStopped = false
@@ -79,13 +85,15 @@ class SyncService : Service() {
                 val id = intent.getStringExtra("id")
                 if (syncStopped || !Operation.sync.running) {
                     outcomes.clear(); preparationError = ""; skipped = 0; syncStopped = false
+                    batchIndexHits = 0; batchIndexQueued = 0
                     remoteIndex = RemoteSyncIndex(deferWrites = true)
                     preparedDestination = ""; indexFlushStarted = false; indexFlushAttempted = false; indexWarning = ""
+                    batchIndexing = false; batchIndexCancelled = AtomicBoolean(false); pendingBatchIndexRecords = null
                 }
                 if (id == null) {
                     if (!batchWaiting && batchIds == null) {
                         batchWaiting = true
-                        syncState(Operation.sync.copy(running = true, starting = false, message = "批量同步正在刷新清单；单条同步可优先执行"))
+                        syncState(Operation.sync.copy(running = true, starting = false, message = "正在刷新本地录音和转写清单；单条同步可优先执行"))
                         requestScan()
                     }
                 } else {
@@ -120,7 +128,7 @@ class SyncService : Service() {
                     val loaded = RecorderSnapshot.load(bridge, previous, SyncDependencies.directory(this))
                     val snapshot = loaded.snapshot
                     val verified = RecordingScanner.verify(snapshot.recordings, previous, bridge, token, loaded.cached) { index, total ->
-                        post { scanState(Operation.scan.copy(message = "刷新录音 · 核对内容 $index/$total")) }
+                        post { scanState(Operation.scan.copy(message = "刷新本地录音状态 $index/$total")) }
                     }
                     if (token.get()) throw InterruptedIOException("刷新已停止")
                     check(bridge.asBinder().pingBinder()) { "读取服务已断开，保留上次本地列表" }
@@ -142,7 +150,7 @@ class SyncService : Service() {
                     if (result != null && !cancelled && error == null) {
                         val eligible = result!!.filter { it.available && it.skipReason.isEmpty() }
                         skipped = result!!.size - eligible.size; batchIds = eligible.map { it.id }.toSet()
-                        queue.batch(eligible.map { it.id })
+                        if (eligible.isEmpty()) queue.batch(emptyList()) else pendingBatchIndexRecords = eligible
                     } else preparationError = if (cancelled) "刷新已停止，批量同步未开始" else "批量同步未开始：${message(error ?: IllegalStateException("刷新失败"))}"
                 }
                 // Include content arriving after a manual upload began during this scan.
@@ -160,11 +168,103 @@ class SyncService : Service() {
         }
     }
 
+    /** Load the remote index once, repair local receipts for hits, and queue only actual deltas. */
+    private fun startBatchIndexFilter(records: List<Recording>) {
+        batchIndexing = true
+        batchIndexCancelled = AtomicBoolean(false)
+        val token = batchIndexCancelled
+        syncState(Operation.sync.copy(running = true, starting = false, currentId = "", message = "正在比较远程增量索引…"))
+        uploader.execute {
+            val needed = mutableListOf<String>()
+            val hits = mutableListOf<Pair<String, Outcome>>()
+            var absentEntries = 0
+            var changedEntries = 0
+            var changedFiles = 0
+            var failure: Exception? = null
+            try {
+                val config = settings.load()
+                check(config.configured) { "请先配置 WebDAV / NAS" }
+                val network = getSystemService(ConnectivityManager::class.java)
+                val capabilities = network.getNetworkCapabilities(network.activeNetwork)
+                check(capabilities != null) { "网络未连接，已保留本地数据" }
+                check(!config.wifiOnly || capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                    "已启用仅 Wi-Fi 同步，请连接 Wi-Fi 后重试"
+                }
+                val dav = WebDav(config, token)
+                batchIndexAbort = { dav.abort() }
+                TransferGate.manual {
+                    // The first lookup fetches the complete index; subsequent lookups are in-memory.
+                    NetworkRetry.run(token, onRetry = { attempt, e ->
+                        trace.append("[索引重试] ${e.javaClass.simpleName}；第 ${attempt + 1} 次尝试")
+                    }) { remoteIndex.entry(dav, records.first().id) }
+                    val bridge = SyncDependencies.bridge()
+                    SyncDependencies.store(this).use { store ->
+                        for (snapshotRecord in records) {
+                            if (token.get()) throw InterruptedIOException("同步已停止")
+                            val r = store.recording(snapshotRecord.id)
+                            if (r == null) { needed += snapshotRecord.id; continue }
+                            val mark = store.mark(config.destination, r.id)
+                            val directory = mark.remoteId.ifBlank { r.id }
+                            val entry = remoteIndex.entry(dav, r.id)
+                            if (entry == null) {
+                                absentEntries++
+                                needed += r.id
+                            } else if (remoteIndex.matches(entry, r, directory, r.size, r.modifiedAt,
+                                    r.contentSha256, config.obsidianDestination)) {
+                                val unchanged = runCatching { bridge.fileInfo(r.path).contentEquals(longArrayOf(r.size, r.modifiedAt)) }
+                                    .getOrDefault(false)
+                                if (!unchanged) {
+                                    changedFiles++
+                                    needed += r.id
+                                    continue
+                                }
+                                val completed = remoteIndex.completedMark(entry, r, mark, directory, config.obsidianDestination)
+                                store.saveMark(config.destination, r.id, completed)
+                                hits += r.id to Outcome(true, r.transcript.isBlank(), record = r)
+                            } else {
+                                changedEntries++
+                                needed += r.id
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) { failure = e }
+            post {
+                batchIndexing = false
+                batchIndexAbort = null
+                if (!syncStopped && !token.get()) {
+                    hits.forEach { (id, outcome) ->
+                        outcomes[id] = outcome
+                        Operation.results = Operation.results - id
+                    }
+                    batchIndexHits = hits.size
+                    batchIndexQueued = needed.size
+                    if (failure != null) {
+                        preparationError = "远程增量索引检查失败：${message(failure!!)}"
+                        trace.append("[索引] 批量对比失败：${message(failure!!)}")
+                    } else {
+                        queue.batch(needed.distinct())
+                        trace.append("[索引] 命中 ${hits.size} 条；缺少索引 ${absentEntries} 条；本地内容或远程收据不同 ${changedEntries} 条；文件状态变化 ${changedFiles} 条；${needed.size} 条进入增量同步")
+                    }
+                }
+                publishQueue(); changed(); pump(); stopIfIdle()
+            }
+        }
+    }
+
     private fun pump() {
         if (queue.active != null) { publishQueue(); return }
         val ticket = queue.take()
-        if (ticket == null) { finishUploads(); return }
+        if (ticket == null) {
+            val batchRecords = pendingBatchIndexRecords
+            if (batchRecords != null) {
+                pendingBatchIndexRecords = null
+                startBatchIndexFilter(batchRecords)
+            } else finishUploads()
+            return
+        }
         indexFlushAttempted = false
+        Operation.currentWasSynced = false
         syncState(TaskState(running = true, currentId = ticket.id, message = if (ticket.manual) "优先同步 · 正在读取此条录音…" else "批量同步 · 正在读取录音…"))
         publishQueue()
         uploader.execute {
@@ -202,6 +302,7 @@ class SyncService : Service() {
                             val notes = WebDav(config!!.obsidianConfig, ticket.cancelled, diagnostic)
                             ticket.abort = { client.abort(); notes.abort() }
                             mark = store.mark(config!!.destination, r.id)
+                            Operation.currentWasSynced = store.state(r, mark, config!!.obsidianDestination) == "已同步"
                             val destinationKey = "${config!!.destination}\n${config!!.obsidianDestination}"
                             val ensurePrepared = {
                                 if (preparedDestination != destinationKey) {
@@ -258,7 +359,7 @@ class SyncService : Service() {
             message = "${if (ticket.manual) "单条优先同步" else "批量同步"} · $step"))
     }
     private fun finishUploads() {
-        if (batchWaiting || queue.busy || !Operation.sync.busy) return
+        if (batchWaiting || batchIndexing || queue.busy || !Operation.sync.busy) return
         if (remoteIndex.hasPendingChanges() && !indexFlushAttempted && !syncStopped) {
             if (indexFlushStarted) return
             indexFlushStarted = true; indexFlushAttempted = true
@@ -285,7 +386,7 @@ class SyncService : Service() {
         val message = when {
             syncStopped -> "同步已停止，已完成的文件会保留"
             preparationError.isNotEmpty() -> preparationError
-            batchIds != null -> "同步结束 · $ok 条已同步 · $missing 条缺少转写 · $skipped 条跳过 · $failures 条失败"
+            batchIds != null -> "同步结束 · $ok 条已同步 · $missing 条缺少转写 · $skipped 条跳过 · $failures 条失败 · 索引命中 $batchIndexHits 条 · 需同步 $batchIndexQueued 条"
             failures > 0 -> "单条同步失败：${selected.values.first { !it.success }.message}"
             else -> "单条同步完成 · $ok 条已同步" + if (missing > 0) " · $missing 条缺少转写" else ""
         }
@@ -295,12 +396,18 @@ class SyncService : Service() {
     }
     private fun stopUploads() {
         batchWaiting = false; batchIds = null; syncStopped = true
+        batchIndexCancelled.set(true); batchIndexAbort?.invoke(); batchIndexAbort = null
+        pendingBatchIndexRecords = null
         requestedDuringScan.clear(); refreshedVersions.clear()
         queue.stopAll(); Operation.queuedIds = emptySet(); Operation.manualIds = emptySet()
         syncState(Operation.sync.copy(message = "正在停止同步…")); pump()
     }
     private fun scanState(state: TaskState) { Operation.scan = state; update() }
-    private fun syncState(state: TaskState) { Operation.sync = state; update() }
+    private fun syncState(state: TaskState) {
+        if (!state.running || state.currentId != Operation.currentId) Operation.currentWasSynced = false
+        Operation.sync = state
+        update()
+    }
     private fun publishQueue() { Operation.queuedIds = queue.pendingIds; Operation.manualIds = queue.manualIds }
     private fun complete(action: String, state: TaskState) {
         Operation.last = state
@@ -314,7 +421,7 @@ class SyncService : Service() {
     private fun changed() = sendBroadcast(Intent("com.yuhuo.shengqiao.CHANGED").setPackage(packageName))
     private fun post(block: () -> Unit) { main.post { if (!destroyed) block() } }
     private fun stopIfIdle() {
-        if (Operation.scan.busy || Operation.sync.busy || queue.busy || batchWaiting) return
+        if (Operation.scan.busy || Operation.sync.busy || queue.busy || batchWaiting || batchIndexing || pendingBatchIndexRecords != null) return
         settings.info("operationInProgress", "false")
         if (stopSelfResult(latestStartId)) {
             stopForeground(STOP_FOREGROUND_REMOVE); wakeLock?.let { if (it.isHeld) it.release() }; wakeLock = null
@@ -339,7 +446,9 @@ class SyncService : Service() {
     }
     override fun onTimeout(startId: Int, fgsType: Int) { scanCancelled.set(true); stopUploads(); stopSelf() }
     override fun onDestroy() {
-        destroyed = true; scanCancelled.set(true); queue.stopAll(); scanner.shutdownNow(); uploader.shutdownNow()
+        destroyed = true; scanCancelled.set(true); batchIndexCancelled.set(true); batchIndexAbort?.invoke()
+        pendingBatchIndexRecords = null
+        queue.stopAll(); scanner.shutdownNow(); uploader.shutdownNow()
         Operation.scan = Operation.scan.copy(running = false, starting = false)
         Operation.sync = Operation.sync.copy(running = false, starting = false, currentId = "")
         Operation.queuedIds = emptySet(); Operation.manualIds = emptySet()

@@ -35,6 +35,7 @@ import com.yuhuo.shengqiao.ui.RecordingPlayer
 import com.yuhuo.shengqiao.ui.CollapsiblePanel
 import com.yuhuo.shengqiao.ui.PanelListView
 import com.yuhuo.shengqiao.update.ReleaseClient
+import com.yuhuo.shengqiao.update.Release
 import androidx.core.content.FileProvider
 import rikka.shizuku.Shizuku
 import java.io.File
@@ -42,6 +43,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
 
 class MainActivity : Activity() {
     private val dark get() = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
@@ -70,6 +72,11 @@ class MainActivity : Activity() {
     private val uiWorker = Executors.newFixedThreadPool(2)
     private val updateWorker = Executors.newSingleThreadExecutor()
     private var updateBusy = false
+    private val updateGeneration = AtomicLong()
+    @Volatile private var activeUpdateClient: ReleaseClient? = null
+    private var activeUpdateRelease: Release? = null
+    private var activeUpdateStatus: TextView? = null
+    private var activeUpdateProxy: Boolean? = null
     private var pendingUpdateInstall = false
     private var homeRoot: LinearLayout? = null
     private var displayStates = emptyMap<String, String>()
@@ -412,7 +419,9 @@ class MainActivity : Activity() {
                 val stamp = settings.getInfo("lastScan")
                 val loaded = if (priorStamp != stamp) store.recordings() else priorRecords
                 val loadedMarks = store.marks(loadedConfig.destination)
-                val states = loaded.associate { it.id to store.state(it, loadedMarks[it.id] ?: SyncMark(), loadedConfig.obsidianDestination) }
+                val states = loaded.associate {
+                    it.id to syncDisplayState(it, loadedMarks[it.id] ?: SyncMark(), loadedConfig.obsidianDestination)
+                }
                 runOnUiThread {
                     if (isDestroyed || isFinishing) return@runOnUiThread
                     refreshInFlight = false
@@ -436,6 +445,12 @@ class MainActivity : Activity() {
     }
 
     private fun TextView.updateText(value: String) { if (text.toString() != value) text = value }
+
+    private fun syncDisplayState(r: Recording, mark: SyncMark, obsidianDestination: String): String {
+        val state = store.state(r, mark, obsidianDestination)
+        return if (Operation.sync.busy && Operation.currentId == r.id && Operation.currentWasSynced &&
+            state != "已同步" && state != "同步失败" && r.available && r.skipReason.isEmpty()) "已同步" else state
+    }
 
     private fun renderHomeStatus() {
         val ready = BridgeClient.ready()
@@ -602,7 +617,7 @@ class MainActivity : Activity() {
     private fun renderDetailTask(r: Recording, mark: SyncMark) {
         val active = Operation.sync.running && Operation.currentId == r.id
         val queued = r.id in Operation.queuedIds
-        val state = store.state(r, mark, config.obsidianDestination)
+        val state = syncDisplayState(r, mark, config.obsidianDestination)
         val failed = Operation.results[r.id]?.failed == true
         val buttonLabel = when {
                 active -> "同步中"
@@ -637,7 +652,7 @@ class MainActivity : Activity() {
                 detailReadPending = false
                 if (!isDestroyed && page == "detail" && detailId == id && pair != null) {
                     marks = marks + (id to pair.second)
-                    val state = store.state(pair.first, pair.second, config.obsidianDestination)
+                    val state = syncDisplayState(pair.first, pair.second, config.obsidianDestination)
                     if (displayStates[id] != state) {
                         displayStates = displayStates + (id to state)
                         listDirty = true
@@ -850,7 +865,13 @@ class MainActivity : Activity() {
             tag = "update-proxy"
             text = "使用国内 GitHub 代理"; textSize = 14f
             isChecked = settings.getInfo("updateProxy", "true") == "true"
-            setOnCheckedChangeListener { _, checked -> settings.info("updateProxy", checked.toString()) }
+            setOnCheckedChangeListener { _, checked ->
+                settings.info("updateProxy", checked.toString())
+                val release = activeUpdateRelease
+                val status = activeUpdateStatus
+                if (updateBusy && release != null && status != null && activeUpdateProxy != checked)
+                    restartUpdateDownload(release, checked, status)
+            }
         }
         form.add(proxy, height = dp(48), top = 8)
         form.add(text("手动检查新版本；启用代理后，检查和下载会依次尝试多个第三方代理。", 12f, muted), top = 6)
@@ -900,22 +921,50 @@ class MainActivity : Activity() {
 
     private fun updateFile() = File(cacheDir, "updates/update.apk")
 
-    private fun downloadUpdate(release: com.yuhuo.shengqiao.update.Release, useProxy: Boolean, status: TextView) {
+    private fun downloadUpdate(release: Release, useProxy: Boolean, status: TextView) {
         if (updateBusy) return
         updateBusy = true
+        val generation = updateGeneration.incrementAndGet()
+        activeUpdateRelease = release; activeUpdateStatus = status; activeUpdateProxy = useProxy
         status.text = "正在下载更新…"
+        enqueueUpdateDownload(release, useProxy, status, generation)
+    }
+
+    private fun restartUpdateDownload(release: Release, useProxy: Boolean, status: TextView) {
+        val generation = updateGeneration.incrementAndGet()
+        activeUpdateClient?.cancel()
+        activeUpdateProxy = useProxy
+        status.text = "代理已切换，正在取消旧下载并重新开始…"
+        enqueueUpdateDownload(release, useProxy, status, generation)
+    }
+
+    private fun enqueueUpdateDownload(release: Release, useProxy: Boolean, status: TextView, generation: Long) {
         updateWorker.execute {
             val result = runCatching {
+                if (generation != updateGeneration.get()) throw java.io.InterruptedIOException("更新下载已取消")
                 val file = updateFile()
                 check(file.parentFile?.mkdirs() == true || file.parentFile?.isDirectory == true) { "无法创建下载目录" }
-                ReleaseClient().download(release, useProxy, file) { done, total ->
-                    val percent = (done * 100 / total).toInt()
-                    runOnUiThread { if (!isDestroyed && page == "settings-update") status.text = "正在下载更新：$percent%" }
+                val client = ReleaseClient()
+                activeUpdateClient = client
+                try {
+                    if (generation != updateGeneration.get()) client.cancel()
+                    client.download(release, useProxy, file) { done, total ->
+                        val percent = (done * 100 / total).toInt()
+                        runOnUiThread {
+                            if (generation == updateGeneration.get() && !isDestroyed && page == "settings-update")
+                                status.text = "正在下载更新：$percent%"
+                        }
+                    }
+                    validateUpdate(file, release.version)
+                } finally {
+                    if (activeUpdateClient === client) activeUpdateClient = null
                 }
-                validateUpdate(file, release.version)
             }
             runOnUiThread {
+                if (generation != updateGeneration.get()) return@runOnUiThread
                 updateBusy = false
+                activeUpdateClient = null
+                activeUpdateRelease = null; activeUpdateStatus = null; activeUpdateProxy = null
                 if (isDestroyed || isFinishing) return@runOnUiThread
                 result.onSuccess {
                     status.text = "下载并校验完成"
@@ -1024,6 +1073,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         appearancePopup?.dismiss(); appearancePopup = null
         audioPlayer?.release(); audioPlayer = null
+        updateGeneration.incrementAndGet(); activeUpdateClient?.cancel()
         unregisterReceiver(receiver); Shizuku.removeBinderReceivedListener(binderReceived)
         Shizuku.removeBinderDeadListener(binderDead); Shizuku.removeRequestPermissionResultListener(permission)
         activeTest?.abort(); worker.shutdown(); uiWorker.shutdownNow(); updateWorker.shutdownNow(); store.close(); super.onDestroy()
