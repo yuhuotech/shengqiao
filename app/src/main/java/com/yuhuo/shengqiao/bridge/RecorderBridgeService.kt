@@ -8,8 +8,8 @@ import org.json.JSONObject
 import java.io.File
 import java.lang.reflect.InvocationTargetException
 
-/** Runs only inside a Shizuku UserService (shell UID), never in the application process. */
-class RecorderBridgeService : IRecorderBridge.Stub() {
+/** Runs in an ADB-launched shell process, never in the ordinary application process. */
+class RecorderBridgeService(private val allowedUid: Int? = null) : IRecorderBridge.Stub() {
     private val lock = Any()
     private val source = "com.android.soundrecorder"
     private val metadataPath = "/storage/emulated/0/Android/data/$source/files/backup/backup.json"
@@ -30,7 +30,7 @@ class RecorderBridgeService : IRecorderBridge.Stub() {
     override fun exportMetadata(): ParcelFileDescriptor = identity {
         synchronized(lock) {
             val uid = android.os.Process.myUid()
-            check(uid == 2000 || uid == 0) { "读取服务没有 shell 权限，请重新启动 Shizuku" }
+            check(uid == 2000 || uid == 0) { "读取服务没有 shell 权限，请重新连接无线调试" }
             val services = serviceDump()
             // Avoid interrupting an active recording or playback service.
             check(RecorderActivity.blockingService(services) == null) { "录音机正在录制或播放，请结束后再刷新 / 同步" }
@@ -40,10 +40,11 @@ class RecorderBridgeService : IRecorderBridge.Stub() {
             val observer = Class.forName("miui.app.backup.IBackupServiceStateObserver")
             val acquired = api.getMethod("acquire", observer, IBinder::class.java)
                 .invoke(service, null, Binder()) as Boolean
-            check(acquired) { "未能取得本地备份权限，请检查 Shizuku 是否以 shell 身份运行" }
-            val target = File.createTempFile("shengqiao-meta-", ".bak", File("/data/local/tmp"))
-            Os.chmod(target.path, 384) // 0600; snapshots never enter shared user storage.
+            check(acquired) { "未能取得本地备份权限，请重新连接读取服务" }
+            var target: File? = null
             try {
+                target = File.createTempFile("shengqiao-meta-", ".bak", File("/data/local/tmp"))
+                Os.chmod(target.path, 384) // 0600; snapshots never enter shared user storage.
                 val started = System.currentTimeMillis()
                 ParcelFileDescriptor.open(target, ParcelFileDescriptor.MODE_WRITE_ONLY).use { out ->
                     api.getMethod("backupPackage", ParcelFileDescriptor::class.java,
@@ -68,7 +69,7 @@ class RecorderBridgeService : IRecorderBridge.Stub() {
             } catch (e: InvocationTargetException) {
                 throw IllegalStateException(e.targetException.message ?: "系统备份导出失败")
             } finally {
-                target.delete()
+                target?.delete()
                 // Only the snapshot file created by this invocation is removed, never source audio.
                 // The open descriptor remains readable by the client after unlinking.
                 runCatching { api.getMethod("release", observer).invoke(service, *arrayOfNulls<Any>(1)) }
@@ -104,9 +105,13 @@ class RecorderBridgeService : IRecorderBridge.Stub() {
     }
 
     private fun <T> identity(block: () -> T): T {
+        val caller = Binder.getCallingUid()
+        check(allowedUid == null || caller == allowedUid || caller == android.os.Process.myUid()) {
+            "未授权的读取请求"
+        }
         val token = Binder.clearCallingIdentity()
         try { return block() } finally { Binder.restoreCallingIdentity(token) }
     }
 
-    override fun destroy() { System.exit(0) }
+    override fun destroy() = identity { System.exit(0) }
 }

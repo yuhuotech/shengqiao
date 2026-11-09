@@ -28,7 +28,6 @@ class AutoSyncJobService : JobService() {
             try {
                 log.reset()
                 if (Operation.scan.busy || Operation.sync.busy) throw InterruptedIOException("手动任务正在运行，本轮跳过")
-                if (!BridgeClient.ready() && SyncDependencies.bridge == null) throw InterruptedIOException("Shizuku 不可用，本轮跳过；服务恢复后下次检查")
                 val config = settings.load()
                 if (!config.configured) throw InterruptedIOException("尚未配置 WebDAV，本轮跳过")
                 val network = getSystemService(ConnectivityManager::class.java)
@@ -36,6 +35,8 @@ class AutoSyncJobService : JobService() {
                 if (capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) != true ||
                     !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED))
                     throw InterruptedIOException("等待非按流量计费的 Wi-Fi，本轮跳过")
+                if (SyncDependencies.bridge == null && !BridgeClient.awaitExisting(5000))
+                    throw InterruptedIOException("读取服务未运行，本轮跳过；请打开声桥启动一次")
                 val bridge = SyncDependencies.bridge()
                 if (JSONObject(bridge.status()).optBoolean("recorderBusy")) throw InterruptedIOException("录音机正在录制 / 播放，本轮跳过")
                 log.append("导出转写快照，检查增量")

@@ -131,7 +131,7 @@ class SyncService : Service() {
                         post { scanState(Operation.scan.copy(message = "刷新本地录音状态 $index/$total")) }
                     }
                     if (token.get()) throw InterruptedIOException("刷新已停止")
-                    check(bridge.asBinder().pingBinder()) { "读取服务已断开，保留上次本地列表" }
+                    check(BridgeClient.alive(bridge)) { "读取服务已断开，保留上次本地列表" }
                     result = store.replaceSnapshot(Snapshot(verified, snapshot.orphanSentences, snapshot.deleted))
                     settings.info("lastScan", System.currentTimeMillis().toString())
                     settings.info("scanNote", "${result!!.size} 条录音 · ${result!!.count { it.transcript.isNotBlank() }} 条有转写" +

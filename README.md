@@ -11,7 +11,7 @@
 [![Latest%20Release](https://img.shields.io/github/v/release/yuhuotech/shengqiao)](https://github.com/yuhuotech/shengqiao/releases/latest)
 [![CI](https://img.shields.io/github/actions/workflow/status/yuhuotech/shengqiao/release.yml)](https://github.com/yuhuotech/shengqiao/actions/workflows/release.yml)
 
-Kotlin 原生 Android 应用，配合 [Shizuku](https://shizuku.rikka.app/) 直接读取小米录音机和本地转写，
+Kotlin 原生 Android 应用，通过内置无线调试连接读取小米录音机和本地转写，
 上传到任意 WebDAV 服务器，并按月归档一份 Markdown 到 Obsidian 仓库。
 
 </div>
@@ -33,7 +33,7 @@ Kotlin 原生 Android 应用，配合 [Shizuku](https://shizuku.rikka.app/) 直�
 ## 背景
 
 小米录音机的转写文本在系统沙箱里，普通 APP 拿不到；每次新录音都要手动分享再上传到 NAS，
-很麻烦。本项目借助 [Shizuku](https://shizuku.rikka.app/) 用 shell 权限调用小米的本地备份接口，
+很麻烦。本项目通过用户授权的无线调试连接，以 shell 身份调用小米的本地备份接口，
 批量拿到全部录音和转写，再通过 WebDAV 同步到你自己的服务器。
 
 > 不会上传任何数据到第三方服务器。所有文件只在你配置的目标地址之间流动。
@@ -63,12 +63,12 @@ Kotlin 原生 Android 应用，配合 [Shizuku](https://shizuku.rikka.app/) 直�
 ```
 Xiaomi Recorder App
         │
-        │  Shizuku UserService (shell UID)
+        │  声桥内置 ADB 客户端 → shell UID
         ▼
 ┌────────────────────────────┐
-│  cn.shengqiao.bridge        │  AIDL: IRecorderBridge
+│  com.yuhuo.shengqiao.bridge │  IRecorderBridge
 │  - exportMetadata()         │  → MiuiBackup feature=3
-│  - openAudio(path)          │  → FD 直接读取原始音频
+│  - openAudio(path)          │  → 本机 ADB 传输音频
 │  - fileInfo(path)           │
 └─────────────┬──────────────┘
               │
@@ -91,21 +91,24 @@ Xiaomi Recorder App
 
 关键点：
 
-- 读取音频使用 ParcelFileDescriptor，不会把文件复制到应用私有目录。
+- 读取服务通过 Binder 返回音频文件描述符；播放和同步直接读取原文件，不另存音频副本。
+- 读取服务以独立 shell 进程运行。首次启动需要无线调试配对或电脑 USB；在服务存活期间，重开声桥时会自动恢复 Binder 连接。
 - SQLite 记录每条录音、每个目的地（destination）的同步状态，互不串扰。
 - 签名使用 APK Signature Scheme v3；升级可保证签名一致。
 
 ## 快速开始
 
-> 前置条件：Android 13+ 的小米 / 国产 ROM 手机，已安装并启动 [Shizuku 13.6+](https://shizuku.rikka.app/download/)，准备一个 WebDAV 服务（NAS、自建 Nextcloud、坚果云等都可以）。
+> 前置条件：Android 13+ 的兼容小米手机、开发者选项中的无线调试和 WLAN，以及 WebDAV 服务。部分系统通知样式会隐藏配对通知操作，可临时切换为 Android 通知样式。
 
 1. 在 [Releases](https://github.com/yuhuotech/shengqiao/releases/latest) 下载 `xiaomi-shengqiao-release-v版本号.apk`，安装到手机。
 2. 打开「小米声桥」→ 顶部「设置」→「同步服务器」，填写 WebDAV 地址 / 账号 / 密码。
    - 主同步目录默认 `/shengqiao`，Obsidian 转写目录默认 `/obsidian/小米录音`，都可改。
    - 点「测试连接」会先登录、创建目录、写读回、清理验证文件，全过才提示「连接成功」。
-3. 返回首页 → 「连接 Shizuku」→ 同意授权。
+3. 首次使用在「设置」→「读取授权」中选择「首次配对」，在系统无线调试页面打开配对码窗口，展开声桥通知并输入配对码。返回声桥后点击「连接读取服务」。
 4. 「刷新录音」会一次性把本地录音和转写导入并展示在首页。
 5. 「一键同步」上传全部；或者点进某条录音，在详情页右上角「同步」单独补传（即使有自动同步在跑，单条也会立即执行）。
+
+读取服务运行期间，关闭无线调试或重新打开声桥不需要再次配对或启动。手机重启后需重新启动读取服务；也可在「读取授权」中查看电脑 USB 启动命令。
 
 ## 检查应用更新
 
@@ -211,7 +214,7 @@ adb -s <serial> shell am instrument -w \
 │   │   ├── MainActivity.kt             # 入口 UI
 │   │   ├── data/                       # 录音、状态、设置、Trace
 │   │   ├── sync/                       # 同步服务、调度、WebDAV、Obsidian
-│   │   ├── bridge/                     # Shizuku UserService 桥
+│   │   ├── bridge/                     # 内置 ADB 与 shell 读取桥
 │   │   └── ui/                         # 播放器、面板、外观
 │   ├── src/test/                       # JVM 单元测试
 │   └── src/androidTest/                # 设备 / 模拟器集成测试

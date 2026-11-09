@@ -1,0 +1,7 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+    <application android:label="小米声桥（测试）" tools:replace="android:label">
+        <provider android:name="com.yuhuo.shengqiao.bridge.DebugBinderProvider"
+            android:authorities="${applicationId}.binder.test" android:exported="true"
+            android:permission="android.permission.DUMP" />
+    </application>
+</manifest>

@@ -25,6 +25,7 @@ import android.view.ViewGroup
 import android.view.WindowInsets
 import android.widget.*
 import com.yuhuo.shengqiao.bridge.BridgeClient
+import com.yuhuo.shengqiao.bridge.AdbPairingService
 import com.yuhuo.shengqiao.data.*
 import com.yuhuo.shengqiao.sync.Operation
 import com.yuhuo.shengqiao.sync.SyncService
@@ -37,7 +38,6 @@ import com.yuhuo.shengqiao.ui.PanelListView
 import com.yuhuo.shengqiao.update.ReleaseClient
 import com.yuhuo.shengqiao.update.Release
 import androidx.core.content.FileProvider
-import rikka.shizuku.Shizuku
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -111,20 +111,15 @@ class MainActivity : Activity() {
         val states: Map<String, String>, val stamp: String?)
     override fun onRetainNonConfigurationInstance(): Any = RetainedList(config, records, marks, displayStates, cacheScan)
     private val receiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) { if (page == "home") refresh() else if (page == "detail") refreshDetail() }
-    }
-    private val binderReceived = Shizuku.OnBinderReceivedListener { runOnUiThread {
-        if (page == "home") refresh()
-        resumePending()
-    } }
-    private val binderDead = Shizuku.OnBinderDeadListener { runOnUiThread { if (page == "home") refresh() } }
-    private val permission = Shizuku.OnRequestPermissionResultListener { _, granted ->
-        runOnUiThread {
-            if (page == "home") refresh()
-            if (granted == PackageManager.PERMISSION_GRANTED) resumePending() else pendingAction = null
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (page) {
+                "home" -> refresh()
+                "detail" -> refreshDetail()
+                "settings-access" -> accessSettingsPage()
+            }
+            if (pendingAction != null && BridgeClient.ready()) resumePending()
         }
     }
-
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
         search = state?.getString("search").orEmpty()
@@ -142,9 +137,6 @@ class MainActivity : Activity() {
             toast("已保存的凭据无法解密，请重新配置 WebDAV"); DavConfig()
         }
         registerReceiver(receiver, IntentFilter("com.yuhuo.shengqiao.CHANGED"), RECEIVER_NOT_EXPORTED)
-        Shizuku.addBinderReceivedListenerSticky(binderReceived)
-        Shizuku.addBinderDeadListener(binderDead)
-        Shizuku.addRequestPermissionResultListener(permission)
         onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT) {
             navigateBack()
         }
@@ -316,7 +308,7 @@ class MainActivity : Activity() {
             setOnClickListener { showTaskLog() }
             setPadding(0, dp(5), 0, dp(5))
         }, ViewGroup.LayoutParams.WRAP_CONTENT)
-        authorize = button("连接 Shizuku") { connectShizuku() }
+        authorize = button("连接读取服务") { connectRecorder() }
         card.add(authorize, top = 10)
         val actions = row()
         scan = button("刷新录音") { if (Operation.scan.busy) stop("scan") else start("scan") }
@@ -454,7 +446,7 @@ class MainActivity : Activity() {
 
     private fun renderHomeStatus() {
         val ready = BridgeClient.ready()
-        status.updateText("${if (ready) "● 读取服务已就绪" else "○ 需要连接 Shizuku"}    ·    ${if (config.configured) "WebDAV 已配置" else "未配置 WebDAV"}")
+        status.updateText("${if (ready) "● 读取服务已就绪" else "○ 需要连接读取服务"}    ·    ${if (config.configured) "WebDAV 已配置" else "未配置 WebDAV"}")
         val completed = displayStates.values.count { it == "已同步" }
         summary.updateText(if (cacheScan == null) "正在读取本地录音…" else "${records.size} 条录音   ${completed} 条已同步")
         val missing = records.count { it.transcript.isBlank() }
@@ -694,7 +686,7 @@ class MainActivity : Activity() {
         entry("同步服务器", if (config.configured) "已配置 WebDAV · 管理目录与连接" else "尚未配置 WebDAV", "server") { serverSettingsPage() }
         entry("自动同步", if (AutoSync.enabled(this)) "已开启 · 管理同步与网络条件" else "已关闭 · 管理同步与网络条件", "auto") { autoSettingsPage() }
         entry("应用更新", "当前版本 ${BuildConfig.VERSION_NAME} · 手动检查更新", "update") { updateSettingsPage() }
-        entry("读取授权", if (BridgeClient.ready()) "读取服务已就绪" else "需要连接或授权 Shizuku", "access") { accessSettingsPage() }
+        entry("读取授权", if (BridgeClient.ready()) "读取服务已就绪" else "需要连接无线调试", "access") { accessSettingsPage() }
         content.add(text("声桥 ${BuildConfig.VERSION_NAME}", 11f, muted).apply { gravity = Gravity.CENTER }, top = 24)
         shell.add(ScrollView(this).apply { addView(content) }, height = 0, weight = 1f, top = 8)
     }
@@ -850,7 +842,7 @@ class MainActivity : Activity() {
             }
         }, height = dp(48), top = 8)
         form.add(text("关闭后，手动同步也可以使用移动网络。自动同步始终需要非按流量计费的 Wi-Fi。", 12f, muted), top = 6)
-        form.add(text("不常驻后台。系统约每小时调度，非按流量计费的 Wi-Fi 且电量充足时检查，有增量才上传。省电策略可能延后执行；Shizuku 不可用时跳过，手动操作优先。", 12f, muted), top = 6)
+        form.add(text("不常驻后台。系统约每小时调度，非按流量计费的 Wi-Fi 且电量充足时检查，有增量才上传。省电策略可能延后执行；读取服务不可用时跳过，手动操作优先。", 12f, muted), top = 6)
         val autoTime = settings.getInfo("autoLastRun").toLongOrNull()
         form.add(text(if (autoTime == null) "尚无自动检查记录" else "最近检查：${date(autoTime, true)}\n${settings.getInfo("autoLastResult")}", 12f, muted), top = 6)
         shell.add(ScrollView(this).apply { addView(form) }, height = 0, weight = 1f, top = 8)
@@ -911,10 +903,11 @@ class MainActivity : Activity() {
         page = "settings-access"
         base("读取授权", back = true)
         val form = column()
-        form.add(text(if (BridgeClient.ready()) "读取服务已就绪" else "需要连接或授权 Shizuku", 14f, bold = true), top = 10)
-        form.add(text("安装并启动 Shizuku 后，允许声桥读取录音。手机重启后可通过 USB 或自行选择无线调试重新启动服务。", 12f, muted), top = 8)
-        form.add(button("打开 / 授权 Shizuku") { connectShizuku() }, top = 10)
-        form.add(button("Shizuku 官方使用说明") { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://shizuku.rikka.app/zh-hans/guide/setup/"))) }, top = 8)
+        form.add(text(if (BridgeClient.ready()) "读取服务已就绪" else "需要连接无线调试", 14f, bold = true), top = 10)
+        form.add(text("每次手机开机后启动一次读取服务；服务运行期间可反复打开声桥，无需反复连接调试。可通过无线调试或电脑 USB 启动。", 12f, muted), top = 8)
+        form.add(button("连接读取服务") { connectRecorder() }, top = 10)
+        form.add(button("首次配对") { beginAdbPairing() }, top = 8)
+        form.add(button("通过电脑 USB 启动") { showUsbStart() }, top = 8)
         form.add(text("声桥 ${BuildConfig.VERSION_NAME}  ·  仅同步到你配置的服务器\n凭据使用 Android Keystore 加密；不删除手机或 NAS 上的原始录音。", 11f, muted), top = 24)
         shell.add(ScrollView(this).apply { addView(form) }, height = 0, weight = 1f, top = 8)
     }
@@ -1013,26 +1006,56 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun connectShizuku() {
-        if (runCatching { Shizuku.pingBinder() }.getOrDefault(false)) {
-            if (BridgeClient.ready()) { toast("Shizuku 已授权"); return }
-            runCatching { Shizuku.requestPermission(100) }.onFailure { toast("请在 Shizuku 中授权声桥") }
+    private fun connectRecorder() {
+        if (BridgeClient.ready()) { toast("读取服务已连接"); resumePending(); return }
+        toast("正在连接手机的无线调试服务")
+        uiWorker.execute {
+            val result = runCatching { BridgeClient.connect() }
+            runOnUiThread {
+                if (result.isSuccess) {
+                    toast("读取服务已连接")
+                    if (page == "home") refresh() else if (page == "settings-access") accessSettingsPage()
+                    resumePending()
+                } else {
+                    AlertDialog.Builder(this).setTitle("连接失败")
+                        .setMessage("请确认已开启无线调试且手机已连接 Wi-Fi。首次使用请先配对。\n\n${result.exceptionOrNull()?.message.orEmpty()}")
+                        .setPositiveButton("首次配对") { _, _ -> beginAdbPairing() }
+                        .setNegativeButton("稍后", null).show()
+                }
+            }
+        }
+    }
+
+    private fun beginAdbPairing() {
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 101)
+            toast("请允许通知后再次点击首次配对")
             return
         }
-        val launch = packageManager.getLaunchIntentForPackage("moe.shizuku.privileged.api")
-        if (launch != null) AlertDialog.Builder(this).setTitle("读取服务尚未启动")
-            .setMessage("不必开启无线调试。你可以用 USB 连接电脑启动 Shizuku；希望离开电脑启动时，再选择无线调试。\n\n服务启动后返回声桥，会自动连接并继续刚才的任务。")
-            .setPositiveButton("打开 Shizuku") { _, _ -> startActivity(launch) }
-            .setNegativeButton("稍后", null).show()
-        else AlertDialog.Builder(this).setTitle("需要 Shizuku")
-            .setMessage("声桥通过 Shizuku 读取小米录音与已有转写，无需手动导入。请先安装并启动 Shizuku。")
-            .setPositiveButton("前往官方下载") { _, _ -> startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://shizuku.rikka.app/download/"))) }
-            .setNegativeButton("稍后", null).show()
+        AlertDialog.Builder(this).setTitle("首次配对")
+            .setMessage("进入开发者选项后，打开「无线调试」→「使用配对码配对设备」。保持配对窗口打开，下拉并展开声桥配对通知，点击「输入配对码」，填入系统显示的六位数字。\n\n若通知没有展开箭头或输入按钮，请在系统「通知与状态栏」中将通知显示样式改为「Android」，配对完成后可自行改回。也可以使用「通过电脑 USB 启动」。\n\n配对成功后返回声桥，点击「连接读取服务」。")
+            .setPositiveButton("打开开发者选项") { _, _ ->
+                AdbPairingService.start(this)
+                startActivity(Intent(AndroidSettings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))
+            }.setNegativeButton("取消", null).show()
+    }
+    private fun showUsbStart() {
+        val command = BridgeClient.usbCommand()
+        val content = text("手机连接电脑并允许 USB 调试，在电脑终端执行下面的命令。成功启动后可断开 USB；手机重启后需要再执行一次。\n\n$command", 13f)
+        content.setTextIsSelectable(true)
+        content.setPadding(dp(20), dp(10), dp(20), dp(10))
+        AlertDialog.Builder(this).setTitle("通过 USB 启动读取服务")
+            .setView(content)
+            .setPositiveButton("复制命令") { _, _ ->
+                val clipboard = getSystemService(android.content.ClipboardManager::class.java)
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("声桥启动命令", command))
+                toast("启动命令已复制")
+            }.setNegativeButton("关闭", null).show()
     }
     private fun start(action: String, id: String? = null) {
         if (action == "scan" && Operation.scan.busy) { toast("正在刷新录音"); return }
         if (action == "sync" && id == null && Operation.sync.busy) { toast("批量同步正在进行；可以在详情优先同步单条"); return }
-        if (!BridgeClient.ready()) { pendingAction = action to id; connectShizuku(); return }
+        if (!BridgeClient.ready()) { pendingAction = action to id; connectRecorder(); return }
         if (action == "sync" && !config.configured) { serverSettingsPage(); toast("请先配置 WebDAV"); return }
         if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 101)
@@ -1074,8 +1097,7 @@ class MainActivity : Activity() {
         appearancePopup?.dismiss(); appearancePopup = null
         audioPlayer?.release(); audioPlayer = null
         updateGeneration.incrementAndGet(); activeUpdateClient?.cancel()
-        unregisterReceiver(receiver); Shizuku.removeBinderReceivedListener(binderReceived)
-        Shizuku.removeBinderDeadListener(binderDead); Shizuku.removeRequestPermissionResultListener(permission)
+        unregisterReceiver(receiver)
         activeTest?.abort(); worker.shutdown(); uiWorker.shutdownNow(); updateWorker.shutdownNow(); store.close(); super.onDestroy()
     }
 }

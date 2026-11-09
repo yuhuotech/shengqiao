@@ -2,6 +2,7 @@ package com.yuhuo.shengqiao.data
 
 import android.os.ParcelFileDescriptor
 import com.yuhuo.shengqiao.bridge.IRecorderBridge
+import com.yuhuo.shengqiao.bridge.BridgeClient
 import org.json.JSONObject
 import java.io.File
 
@@ -19,7 +20,7 @@ object RecorderSnapshot {
         if (JSONObject(bridge.status()).optBoolean("recorderBusy")) return prior()
         val descriptor = try { bridge.exportMetadata() } catch (e: Exception) {
             // A recording may start between the status check and export's guard.
-            if (bridge.asBinder().pingBinder() && JSONObject(bridge.status()).optBoolean("recorderBusy")) return prior()
+            if (BridgeClient.alive(bridge) && JSONObject(bridge.status()).optBoolean("recorderBusy")) return prior()
             throw e
         }
         return ParcelFileDescriptor.AutoCloseInputStream(descriptor).bufferedReader().use {

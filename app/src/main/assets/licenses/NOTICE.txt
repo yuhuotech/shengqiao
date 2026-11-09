@@ -1,0 +1,18 @@
+Third-party components used by ShengQiao's embedded ADB implementation
+
+LibADB Android 3.1.1
+Copyright 2021 Muntashir Al-Islam and contributors.
+The project offers Apache-2.0 or GPL-3.0-or-later licensing; parts of the
+ADB stream implementation also carry BSD-3-Clause notices.
+Source: https://github.com/MuntashirAkon/libadb-android/tree/3.1.1
+
+Spake2-Java / spake2-android 2.2.1
+Copyright 2021 Muntashir Al-Islam and contributors.
+Licensed under LGPL-3.0. The Android package includes libspake2.so as a
+separately loaded shared library.
+Corresponding source: https://github.com/MuntashirAkon/spake2-java/tree/2.2.1
+License texts: LGPL-3.0.txt and GPL-3.0.txt in this directory.
+
+Conscrypt 2.5.3
+Copyright The Conscrypt Authors. Licensed under Apache-2.0.
+Source: https://github.com/google/conscrypt/tree/2.5.3

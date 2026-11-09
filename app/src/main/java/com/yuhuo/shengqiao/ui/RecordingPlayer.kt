@@ -64,11 +64,11 @@ class RecordingPlayer(
                     descriptor.use {
                         if (released || player !== p) return@post
                         try { p.setDataSource(it.fileDescriptor); p.prepareAsync() }
-                        catch (_: Exception) { error(p, "无法读取音频，请检查 Shizuku 授权及原文件") }
+                        catch (_: Exception) { error(p, "无法读取音频，请检查读取服务及原文件") }
                     }
                 }
             } catch (_: Exception) {
-                handler.post { error(p, "无法读取音频，请先连接 Shizuku，并确认原文件仍存在") }
+                handler.post { error(p, "无法读取音频，请先连接读取服务，并确认原文件仍存在") }
             }
         }
     }

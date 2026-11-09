@@ -2,6 +2,7 @@ package com.yuhuo.shengqiao.data
 
 import android.os.ParcelFileDescriptor
 import com.yuhuo.shengqiao.bridge.IRecorderBridge
+import com.yuhuo.shengqiao.bridge.BridgeClient
 import java.io.InterruptedIOException
 import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicBoolean
@@ -15,7 +16,7 @@ object RecordingScanner {
             if (cancelled.get()) throw InterruptedIOException("同步已停止")
             progress(index + 1, records.size)
             val stat = try { bridge.fileInfo(r.path) } catch (e: Exception) {
-                check(bridge.asBinder().pingBinder()) { "读取服务已断开，保留上次本地列表" }
+                check(BridgeClient.alive(bridge)) { "读取服务已断开，保留上次本地列表" }
                 return@mapIndexed r.copy(skipReason = "此文件暂时无法读取，下次刷新重试")
             }
             if (stat[0] <= 0) return@mapIndexed r.copy(available = false, skipReason = "")
@@ -32,7 +33,7 @@ object RecordingScanner {
                 else r.copy(size = stat[0], contentSha256 = digest, modifiedAt = stat[1], skipReason = "", available = true)
             } catch (e: Exception) {
                 if (cancelled.get() || e is InterruptedIOException) throw e
-                check(bridge.asBinder().pingBinder()) { "读取服务已断开，保留上次本地列表" }
+                check(BridgeClient.alive(bridge)) { "读取服务已断开，保留上次本地列表" }
                 r.copy(skipReason = "此文件暂时无法读取，下次刷新重试")
             }
         }

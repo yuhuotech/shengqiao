@@ -7,8 +7,8 @@ android {
         applicationId = "com.yuhuo.shengqiao"
         minSdk = 33
         targetSdk = 36
-        versionCode = 18
-        versionName = "0.5.6"
+        versionCode = 19
+        versionName = "0.5.7"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildFeatures { aidl = true; buildConfig = true }
@@ -36,6 +36,11 @@ android {
         }
     }
     buildTypes {
+        debug {
+            if (providers.gradleProperty("shengqiaoIsolatedDebug").isPresent) {
+                applicationIdSuffix = ".debug"
+            }
+        }
         release {
             isMinifyEnabled = false
             isShrinkResources = false
@@ -53,9 +58,9 @@ android {
 
 dependencies {
     implementation("androidx.core:core:1.13.1")
-    implementation("dev.rikka.shizuku:api:13.1.5")
-    implementation("dev.rikka.shizuku:provider:13.1.5")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.github.MuntashirAkon:libadb-android:3.1.1")
+    implementation("org.conscrypt:conscrypt-android:2.5.3")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20250517")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
